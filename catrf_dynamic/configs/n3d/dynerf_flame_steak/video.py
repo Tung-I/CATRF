@@ -1,9 +1,8 @@
 _base_ = '../default.py'
-# expname = 'flame_steak_video_ds3'
-expname = 'flame_steak_video'
+expname = "flame_steak_vanilla"
 ckptname = None
 wandbprojectname = 'ca_flame_steak_video'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_flame_steak'
+basedir = 'logs'
 
 data = dict(
 	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/flame_steak/llff/',

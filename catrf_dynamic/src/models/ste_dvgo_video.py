@@ -5,15 +5,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import copy
+from TeTriRF.lib.dvgo import DirectVoxGO
+from TeTriRF.lib.dmpigo import DirectMPIGO
 
-from third_party.TeTriRF.lib.dvgo import DirectVoxGO
-from third_party.TeTriRF.lib.dmpigo import DirectMPIGO
-from third_party.TeTriRF.lib.dvgo_video import RGB_Net, RGB_SH_Net
-
-from catrf_dynamic.models.codec_wrapper import DCVCVideoCodecWrapper
-from catrf_dynamic.models.codec_wrapper import PyNvVideoCodecWrapper
-from catrf_dynamic.models.codec_wrapper import VideoCodecWrapper
+from TeTriRF.lib.dvgo_video import RGB_Net, RGB_SH_Net
 
 class STE_DVGO_Video(nn.Module):
     def __init__(self, frameids, xyz_min, xyz_max, cfg=None, device='cuda'):
@@ -29,10 +26,13 @@ class STE_DVGO_Video(nn.Module):
 
         # ---- Codec (video only) ----
         if cfg.codec.name == 'DCVCVideoCodec':
+            from src.models.codec_wrapper import DCVCVideoCodecWrapper
             self.codec = DCVCVideoCodecWrapper(self.cfg.codec, device)
         elif cfg.codec.name == 'PyNvVideoCodecWrapper':
+            from src.models.codec_wrapper import PyNvVideoCodecWrapper
             self.codec = PyNvVideoCodecWrapper(self.cfg.codec, device)
         elif cfg.codec.name in ['HEVCVideoCodec', 'AV1VideoCodec', 'VP9VideoCodec']:
+            from src.models.codec_wrapper import VideoCodecWrapper
             self.codec = VideoCodecWrapper(self.cfg.codec, device)
         else:
             raise NotImplementedError(f"Unknown codec {cfg.codec.name}")

@@ -1,0 +1,1002 @@
+# lib/plane_codec_dcvc.py  (new file)
+import torch
+from einops import rearrange
+import numpy as np
+import torch.nn.functional as F
+import math
+import cv2
+from typing import Tuple, Optional, List
+import av, io
+from fractions import Fraction
+import time
+import PyNvVideoCodec as nvc
+
+DCVC_ALIGN = 32
+
+# ======================== PyNvVideoCodec HW ROUNDTRIP HELPERS ========================
+
+# Last measured timings for debugging / benchmarking
+LAST_HW_CODEC_STATS = {
+    "hevc": {},
+    "av1": {},
+}
+
+
+class _MemoryFeeder:
+    """Feed an in-memory bytestream to PyNvVideoCodec demuxer callback."""
+    def __init__(self, data: bytes):
+        self.data = memoryview(data)
+        self.pos = 0
+
+    def feed_chunk(self, demuxer_buffer) -> int:
+        remaining = len(self.data) - self.pos
+        if remaining <= 0:
+            return 0
+        n = min(len(demuxer_buffer), remaining)
+        demuxer_buffer[:n] = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return n
+
+
+def _rgb_to_yuv444_u8_planes(rgb_f01_hwc: np.ndarray) -> np.ndarray:
+    """
+    Convert HxWx3 RGB float [0,1] to planar YUV444 uint8 laid out as:
+      [Y plane][U plane][V plane]
+    Returned shape: (3*H*W,), dtype=uint8
+    Full-range BT.601-style conversion.
+    """
+    rgb = np.clip(rgb_f01_hwc, 0.0, 1.0).astype(np.float32)
+    r = rgb[..., 0]
+    g = rgb[..., 1]
+    b = rgb[..., 2]
+
+    # Full-range RGB -> YCbCr
+    y  = 0.299000 * r + 0.587000 * g + 0.114000 * b
+    cb = -0.168736 * r - 0.331264 * g + 0.500000 * b + 0.5
+    cr =  0.500000 * r - 0.418688 * g - 0.081312 * b + 0.5
+
+    y  = np.clip(np.rint(y  * 255.0), 0, 255).astype(np.uint8)
+    cb = np.clip(np.rint(cb * 255.0), 0, 255).astype(np.uint8)
+    cr = np.clip(np.rint(cr * 255.0), 0, 255).astype(np.uint8)
+
+    return np.concatenate([y.reshape(-1), cb.reshape(-1), cr.reshape(-1)], axis=0)
+
+def _rgb_to_nv12_u8(rgb_f01_hwc: np.ndarray) -> np.ndarray:
+    """
+    Convert HxWx3 RGB float [0,1] to NV12 uint8 byte layout:
+      [Y plane][interleaved UV plane]
+    Returned shape: (H*W + H*W//2,), dtype=uint8
+
+    Assumes H and W are even.
+    """
+    rgb = np.clip(rgb_f01_hwc, 0.0, 1.0).astype(np.float32)
+    H, W, _ = rgb.shape
+    if (H % 2) != 0 or (W % 2) != 0:
+        raise ValueError(f"NV12 requires even H,W, got {(H, W)}")
+
+    r = rgb[..., 0]
+    g = rgb[..., 1]
+    b = rgb[..., 2]
+
+    # Full-range RGB -> YCbCr
+    y  = 0.299000 * r + 0.587000 * g + 0.114000 * b
+    cb = -0.168736 * r - 0.331264 * g + 0.500000 * b + 0.5
+    cr =  0.500000 * r - 0.418688 * g - 0.081312 * b + 0.5
+
+    y  = np.clip(np.rint(y  * 255.0), 0, 255).astype(np.uint8)
+    cb = np.clip(np.rint(cb * 255.0), 0, 255).astype(np.uint8)
+    cr = np.clip(np.rint(cr * 255.0), 0, 255).astype(np.uint8)
+
+    # 2x2 average for chroma subsampling
+    cb_420 = (
+        cb[0::2, 0::2].astype(np.float32) +
+        cb[0::2, 1::2].astype(np.float32) +
+        cb[1::2, 0::2].astype(np.float32) +
+        cb[1::2, 1::2].astype(np.float32)
+    ) * 0.25
+    cr_420 = (
+        cr[0::2, 0::2].astype(np.float32) +
+        cr[0::2, 1::2].astype(np.float32) +
+        cr[1::2, 0::2].astype(np.float32) +
+        cr[1::2, 1::2].astype(np.float32)
+    ) * 0.25
+
+    cb_420 = np.clip(np.rint(cb_420), 0, 255).astype(np.uint8)
+    cr_420 = np.clip(np.rint(cr_420), 0, 255).astype(np.uint8)
+
+    # Interleaved UV plane for NV12
+    uv = np.empty((H // 2, W), dtype=np.uint8)
+    uv[:, 0::2] = cb_420
+    uv[:, 1::2] = cr_420
+
+    return np.concatenate([y.reshape(-1), uv.reshape(-1)], axis=0)
+
+def _encode_frames_to_in_memory_bitstream(
+    canvases_cpu_f01: torch.Tensor,   # [T,3,H,W] float in [0,1], CPU
+    *,
+    codec: str,                       # "hevc" | "av1"
+    fps: int,
+    gop: int,
+    qp: int,
+    preset: str = "p4",
+    tuning_info: str = "high_quality",
+    gpu_id: int = 0,
+    pix_fmt : str = "NV12",
+) -> Tuple[bytes, int, float]:
+    """
+    NVENC encode to an in-memory compressed bytestream using CPU input mode + YUV444 input.
+    Returns:
+      bitstream_bytes, total_bits, encode_sec
+    """
+    assert canvases_cpu_f01.device.type == "cpu"
+    assert canvases_cpu_f01.ndim == 4 and canvases_cpu_f01.shape[1] == 3
+
+    T, _, H, W = map(int, canvases_cpu_f01.shape)
+
+    # PyNvVideoCodec encoder config
+    # caps = nvc.GetEncoderCaps(codec="hevc", gpuid=0)
+    # raise Exception(caps)
+
+    enc = nvc.CreateEncoder(
+        width=W,
+        height=H,
+        fmt=pix_fmt,
+        usecpuinputbuffer=True,
+        codec=str(codec).lower(),
+        gpuid=int(gpu_id),
+        fps=int(fps),
+        gop=int(gop),
+        rc="constqp",
+        constqp=int(qp),
+        # preset=str(preset),
+        tuning_info=str(tuning_info),
+        bf=0,  # IPPP for lower latency / simpler timing
+    )
+
+    chunks: List[bytes] = []
+    t0 = time.perf_counter()
+
+    for t in range(T):
+        rgb = (
+            canvases_cpu_f01[t]
+            .clamp(0, 1)
+            .permute(1, 2, 0)     # HWC
+            .contiguous()
+            .numpy()
+        )
+
+        if str(pix_fmt).upper() == "NV12":
+            frame_bytes = _rgb_to_nv12_u8(rgb)
+        elif str(pix_fmt).upper() == "YUV444":
+            frame_bytes = _rgb_to_yuv444_u8_planes(rgb)
+        else:
+            raise ValueError(f"Unsupported HW encoder input pix_fmt: {pix_fmt}")
+
+        bs = enc.Encode(frame_bytes)
+
+        if bs is not None and len(bs) > 0:
+            chunks.append(bytes(bs))
+
+    tail = enc.EndEncode()
+    if tail is not None and len(tail) > 0:
+        chunks.append(bytes(tail))
+
+    encode_sec = time.perf_counter() - t0
+    bitstream = b"".join(chunks)
+    total_bits = len(bitstream) * 8
+    return bitstream, total_bits, encode_sec
+
+
+def _decode_in_memory_bitstream_to_rgbp(
+    bitstream: bytes,
+    *,
+    codec: str,
+    gpu_id: int = 0,
+) -> Tuple[List[torch.Tensor], float]:
+    feeder = _MemoryFeeder(bitstream)
+    dmx = nvc.CreateDemuxer(feeder.feed_chunk)
+
+    dec = nvc.CreateDecoder(
+        gpuid=int(gpu_id),
+        codec=dmx.GetNvCodecId(),
+        usedevicememory=True,
+        outputColorType=nvc.OutputColorType.RGBP,
+    )
+
+    frames_gpu: List[torch.Tensor] = []
+    t0 = time.perf_counter()
+
+    for packet in dmx:
+        out_frames = dec.Decode(packet)
+        for f in out_frames:
+            ten = torch.from_dlpack(f).clone()  # clone to own the memory, as PyNvVideoCodec may reuse buffers
+            frames_gpu.append(ten)
+
+    # Flush only if the installed binding actually exposes it.
+    if hasattr(dec, "Flush"):
+        for f in dec.Flush():
+            ten = torch.from_dlpack(f)
+            frames_gpu.append(ten)
+
+    decode_sec = time.perf_counter() - t0
+    return frames_gpu, decode_sec
+
+
+def _pynv_hw_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,
+    *,
+    codec: str,
+    fps: int,
+    gop: int,
+    qp: int,
+    preset: str = "p4",
+    tuning_info: str = "high_quality",
+    gpu_id: int = 0,
+    grayscale: bool = False,
+    pix_fmt : str = "NV12",
+) -> Tuple[torch.Tensor, int, dict]:
+    assert canvases_cpu_f01.device.type == "cpu"
+    assert canvases_cpu_f01.ndim == 4 and canvases_cpu_f01.shape[1] in (1, 3)
+
+    if grayscale:
+        assert canvases_cpu_f01.shape[1] == 1, "grayscale=True expects [T,1,H,W]"
+        enc_in = canvases_cpu_f01.repeat(1, 3, 1, 1).contiguous()
+    else:
+        assert canvases_cpu_f01.shape[1] == 3, "color path expects [T,3,H,W]"
+        enc_in = canvases_cpu_f01
+
+    T, _, H, W = map(int, enc_in.shape)
+
+    bitstream, total_bits, enc_sec = _encode_frames_to_in_memory_bitstream(
+        enc_in,
+        codec=codec,
+        fps=fps,
+        gop=gop,
+        qp=qp,
+        preset=preset,
+        tuning_info=tuning_info,
+        gpu_id=gpu_id,
+        pix_fmt =pix_fmt ,
+    )
+
+    frames_gpu, dec_sec = _decode_in_memory_bitstream_to_rgbp(
+        bitstream,
+        codec=codec,
+        gpu_id=gpu_id,
+    )
+
+    if len(frames_gpu) != T:
+        raise RuntimeError(
+            f"Decoded {len(frames_gpu)} frames, expected {T}. "
+            "Your PyNvVideoCodec build may require Decoder.Flush() exposure or explicit EOS draining."
+        )
+
+    fixed_frames = []
+    for f in frames_gpu:
+        ten = f
+        if ten.ndim != 3:
+            raise RuntimeError(f"Decoded frame ndim={ten.ndim}, expected 3")
+        # Prefer planar [3,H,W]; fallback from HWC -> CHW if needed
+        if ten.shape[0] == 3:
+            pass
+        elif ten.shape[-1] == 3:
+            ten = ten.permute(2, 0, 1).contiguous()
+        else:
+            raise RuntimeError(f"Cannot interpret decoded RGB frame shape {tuple(ten.shape)}")
+        fixed_frames.append(ten)
+
+    rec_gpu = torch.stack(fixed_frames, dim=0).to(torch.float32).div_(255.0)  # [T,3,H,W]
+    rec_cpu = rec_gpu.cpu()
+
+    if grayscale:
+        rec_cpu = rec_cpu[:, :1, ...].contiguous()
+
+    stats = {
+        "num_frames": int(T),
+        "height": int(H),
+        "width": int(W),
+        "total_bits": int(total_bits),
+        "encode_sec": float(enc_sec),
+        "decode_sec": float(dec_sec),
+        "encode_fps": float(T) / max(float(enc_sec), 1e-12),
+        "decode_fps": float(T) / max(float(dec_sec), 1e-12),
+    }
+
+    LAST_HW_CODEC_STATS[str(codec).lower()] = stats
+    return rec_cpu, int(total_bits), stats
+
+
+def hevc_hw_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,
+    *,
+    fps: int,
+    gop: int,
+    qp: int,
+    preset: str = "P4",
+    tune: str = "high_quality",
+    pix_fmt: str = "yuv444p",
+    grayscale: bool = False,
+    gpu_id: int = 0,
+) -> Tuple[torch.Tensor, int, dict]:
+    return _pynv_hw_video_roundtrip(
+        canvases_cpu_f01,
+        codec="hevc",
+        fps=fps,
+        gop=gop,
+        qp=qp,
+        preset=preset,
+        tuning_info=tune,
+        gpu_id=gpu_id,
+        grayscale=grayscale,
+        pix_fmt = pix_fmt,
+    )
+
+
+def av1_hw_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,
+    *,
+    fps: int,
+    gop: int,
+    qp: int,
+    cpu_used: int | str = 0,
+    pix_fmt: str = "yuv444p",
+    grayscale: bool = False,
+    gpu_id: int = 0,
+    preset: str = "P4",
+    tune: str = "high_quality",
+) -> Tuple[torch.Tensor, int, dict]:
+    return _pynv_hw_video_roundtrip(
+        canvases_cpu_f01,
+        codec="av1",
+        fps=fps,
+        gop=gop,
+        qp=qp,
+        preset=preset,
+        tuning_info=tune,
+        gpu_id=gpu_id,
+        grayscale=grayscale,
+    )
+
+
+# --- PyAV video round-trip helpers (HEVC / AV1 / VP9) ---
+
+def _pyav_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,   # [T,3,H,W] or [T,1,H,W], float in [0,1], CPU
+    *,
+    encoder: str,                     # "libx265" | "libaom-av1" | "libvpx-vp9"
+    container: str,                   # "hevc" | "ivf" | "webm"
+    pix_fmt: str,                     # e.g. "yuv444p" (ignored if grayscale=True)
+    fps: int,
+    gop: int,
+    options: dict | None = None,
+    force_bitrate0: bool = False,     # generally not needed in QP mode
+    grayscale: bool = False,          # NEW: true monochrome (1-plane) path
+) -> Tuple[torch.Tensor, int]:
+    """
+    Encode RGB-like or grayscale canvases to a bytestream (in-memory) and decode back.
+    Returns: (decoded [T,C,H,W] float[0,1] CPU, total_bit_count), where C == 3 (color) or 1 (gray).
+    """
+    assert canvases_cpu_f01.device.type == "cpu", "Pass CPU tensor"
+    assert canvases_cpu_f01.ndim == 4 and canvases_cpu_f01.shape[1] in (1, 3)
+    if grayscale:
+        assert canvases_cpu_f01.shape[1] == 1, "grayscale=True expects input shape [T,1,H,W]"
+    else:
+        assert canvases_cpu_f01.shape[1] == 3, "color path expects input shape [T,3,H,W]"
+
+    T, C_in, H, W = map(int, canvases_cpu_f01.shape)
+    target_pix_fmt = "gray" if grayscale else pix_fmt
+
+    # ---- Encode ----
+    out_buf = io.BytesIO()
+    oc = av.open(out_buf, mode="w", format=container)
+
+    stream = oc.add_stream(encoder, rate=int(fps))
+    stream.width = W
+    stream.height = H
+    stream.time_base = Fraction(1, int(fps))
+    stream.codec_context.time_base = Fraction(1, int(fps))
+    stream.gop_size = int(gop)
+    stream.pix_fmt = target_pix_fmt
+
+    if force_bitrate0:
+        stream.codec_context.bit_rate = 0
+
+    if options:
+        for k, v in options.items():
+            stream.codec_context.options[str(k)] = str(v)
+
+    # Encode all frames
+    for t in range(T):
+        if grayscale:
+            frm_u8 = (canvases_cpu_f01[t, 0]
+                      .clamp(0, 1)
+                      .contiguous()
+                      .numpy() * 255.0 + 0.5).astype(np.uint8)        # [H,W]
+            vf = av.VideoFrame.from_ndarray(frm_u8, format="gray")
+        else:
+            frm_u8 = (canvases_cpu_f01[t]
+                      .clamp(0, 1)
+                      .permute(1, 2, 0)                                # H W 3
+                      .contiguous()
+                      .numpy() * 255.0 + 0.5).astype(np.uint8)
+            vf = av.VideoFrame.from_ndarray(frm_u8, format="rgb24")
+            vf = vf.reformat(format=target_pix_fmt)                    # rgb24 -> yuv444p (or any color fmt)
+
+        # for gray, vf already 'gray'; no reformat needed
+        for packet in stream.encode(vf):
+            oc.mux(packet)
+
+    # Flush
+    for packet in stream.encode(None):
+        oc.mux(packet)
+    oc.close()
+
+    bitstream = out_buf.getvalue()
+    total_bits = len(bitstream) * 8
+
+    # ---- Decode ----
+    in_buf = io.BytesIO(bitstream)
+    ic = av.open(in_buf, mode="r")
+    rec_frames: List[torch.Tensor] = []
+    for frame in ic.decode(video=0):
+        if grayscale:
+            g = frame.to_ndarray(format="gray")                       # [H,W] uint8
+            rec_frames.append(torch.from_numpy(g)[None, ...].float().div_(255.0))  # [1,H,W]
+        else:
+            rgb = frame.to_ndarray(format="rgb24")                    # [H,W,3]
+            rec_frames.append(torch.from_numpy(rgb).permute(2, 0, 1).float().div_(255.0))  # [3,H,W]
+    ic.close()
+
+    if len(rec_frames) != T:
+        raise RuntimeError(f"Decoded {len(rec_frames)} frames, expected {T}")
+
+    rec = torch.stack(rec_frames, dim=0)  # [T,C,H,W]
+    if tuple(rec.shape[-2:]) != (H, W):
+        raise RuntimeError(f"Roundtrip size mismatch: in ({H},{W}) vs out {tuple(rec.shape[-2:])}")
+
+    return rec, total_bits
+
+
+def hevc_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,
+    *,
+    fps: int,
+    gop: int,
+    qp: int,
+    preset: str = "medium",
+    pix_fmt: str = "yuv444p",
+    grayscale: bool = False,   # NEW
+) -> Tuple[torch.Tensor, int]:
+    """
+    HEVC (libx265) **constant QP** via x265-params qp=...
+    Raw Annex-B stream with VPS/SPS/PPS (repeat-headers=1) for robust decoding.
+    """
+    x265_params = f"repeat-headers=1:keyint={int(gop)}:min-keyint={int(gop)}:scenecut=0:qp={int(qp)}"
+    opts = {
+        "preset": str(preset),
+        "x265-params": x265_params,
+    }
+    return _pyav_video_roundtrip(
+        canvases_cpu_f01,
+        encoder="libx265",
+        container="hevc",
+        pix_fmt=pix_fmt,
+        fps=fps,
+        gop=gop,
+        options=opts,
+        force_bitrate0=False,
+        grayscale=grayscale,
+    )
+
+
+def av1_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,
+    *,
+    fps: int,
+    gop: int,
+    qp: int,                    # 0..63 (lower = higher quality)
+    cpu_used: int | str = 6,
+    pix_fmt: str = "yuv444p",
+    grayscale: bool = False,
+) -> Tuple[torch.Tensor, int]:
+    """
+    AV1 (libaom-av1), constrained-quality (CQ) mode:
+      - end-usage=cq
+      - crf=cq-level=qp   (0..63, lower=higher quality)
+      - bit_rate=0 to honor CRF
+      - profile=1 for 4:4:4
+      - for grayscale, feed 3ch YUV + monochrome=1
+    """
+    crf = int(max(0, min(63, int(qp))))
+    opts = {
+        "end-usage": "cq",
+        "crf": str(crf),
+        "cq-level": str(crf),        # belt-and-suspenders: some builds read this
+        "cpu-used": str(cpu_used),
+        "row-mt": "1",
+        # leave AQ/DeltaQ at defaults; CRF will still take effect
+    }
+    if str(pix_fmt).startswith("yuv444"):
+        opts["profile"] = "1"
+
+    if grayscale:
+        opts["monochrome"] = "1"
+        canv_3 = canvases_cpu_f01.repeat(1, 3, 1, 1)   # [T,3,H,W]
+        rec_3, bits = _pyav_video_roundtrip(
+            canv_3,
+            encoder="libaom-av1",
+            container="ivf",
+            pix_fmt=pix_fmt,
+            fps=fps,
+            gop=gop,
+            options=opts,
+            force_bitrate0=True,      # <- critical for CQ
+            grayscale=False,          # feeding color
+        )
+        return rec_3[:, :1, ...], bits
+
+    return _pyav_video_roundtrip(
+        canvases_cpu_f01,
+        encoder="libaom-av1",
+        container="ivf",
+        pix_fmt=pix_fmt,
+        fps=fps,
+        gop=gop,
+        options=opts,
+        force_bitrate0=True,          # <- critical for CQ
+        grayscale=False,
+    )
+
+
+def vp9_video_roundtrip(
+    canvases_cpu_f01: torch.Tensor,
+    *,
+    fps: int,
+    gop: int,
+    qp: int,                    # 0..63 (lower = higher quality)
+    cpu_used: int | str = 4,
+    pix_fmt: str = "yuv444p",
+    grayscale: bool = False,
+) -> Tuple[torch.Tensor, int]:
+    """
+    VP9 (libvpx-vp9) constant QP:
+      - end-usage=q
+      - qmin=qmax=qp
+      - crf=<qp>  (keep CQ level consistent with QP to avoid validation errors)
+      - profile=1 required for 4:4:4 (yuv444p)
+      - grayscale: still feed 3-ch YUV, set monochrome=1 (bitstream drops chroma)
+    """
+    opts = {
+        "end-usage": "q",
+        "qmin": str(int(qp)),
+        "qmax": str(int(qp)),
+        "crf":  str(int(qp)),      # <<< IMPORTANT: match CQ level to qp
+        "cpu-used": str(cpu_used),
+        "row-mt": "1",
+    }
+    if str(pix_fmt).startswith("yuv444"):
+        opts["profile"] = "1"
+    if grayscale:
+        opts["monochrome"] = "1"
+        canv_3 = canvases_cpu_f01.repeat(1, 3, 1, 1)  # [T,3,H,W]
+        rec_3, bits = _pyav_video_roundtrip(
+            canv_3,
+            encoder="libvpx-vp9",
+            container="webm",
+            pix_fmt=pix_fmt,
+            fps=fps,
+            gop=gop,
+            options=opts,
+            force_bitrate0=False,
+            grayscale=False,       # feed as color
+        )
+        return rec_3[:, :1, ...], bits
+
+    return _pyav_video_roundtrip(
+        canvases_cpu_f01,
+        encoder="libvpx-vp9",
+        container="webm",
+        pix_fmt=pix_fmt,
+        fps=fps,
+        gop=gop,
+        options=opts,
+        force_bitrate0=False,
+        grayscale=False,
+    )
+
+
+
+# ======================== JPEG HELPERS ========================
+def to_uint8_from_float01(img_f01_hw_or_hw3: np.ndarray) -> np.ndarray:
+    """float32 [0,1] → uint8 [0,255] with rounding; accepts HxW (mono) or HxWx3 (BGR)."""
+    img = np.clip(img_f01_hw_or_hw3, 0.0, 1.0)
+    return np.rint(img * 255.0).astype(np.uint8)
+
+def to_float01_from_uint8(img_u8_hw_or_hw3: np.ndarray) -> np.ndarray:
+    return img_u8_hw_or_hw3.astype(np.float32) / 255.0
+
+def jpeg_roundtrip_color(img_f01_bgr: np.ndarray, quality: int) -> Tuple[np.ndarray, int]:
+    """
+    JPEG encode/decode round-trip on CPU.
+    img_f01_bgr: HxWx3 float in [0,1] (BGR order for OpenCV).
+    Returns: (decoded_f01_bgr, encoded_bits)
+    """
+    img_u8 = to_uint8_from_float01(img_f01_bgr)               # HxWx3 uint8 BGR
+    ok, buf = cv2.imencode(".jpg", img_u8, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        raise RuntimeError("cv2.imencode(.jpg, ...) failed")
+    bits = int(buf.size) * 8
+    dec = cv2.imdecode(buf, cv2.IMREAD_COLOR)                   # HxWx3 uint8 BGR
+    if dec is None:
+        raise RuntimeError("cv2.imdecode failed")
+    return to_float01_from_uint8(dec), bits
+
+def sandwich_planes_to_rgb(
+    x01: torch.Tensor,                            # [T,C,H,W] in [0,1]
+    pre_unet: torch.nn.Module,                   # SmallUNet(C->3)
+    pre_mlp: torch.nn.Module,                    # MLP 1x1 (C->3)
+    bound_pre: torch.nn.Module,                  # BoundedProjector(3)
+    align: int,                                  # DCVC_ALIGN
+) -> Tuple[torch.Tensor, Tuple[int,int]]:
+    """
+    Learned pack: [T,C,H,W] -> y_pad [T,3,Hp,Wp], returns orig (H, W).
+    """
+    assert x01.dim() == 4, f"expected [T,C,H,W], got {x01.shape}"
+    T, C, H, W = x01.shape
+
+    # run per frame; keep it batched over T
+    y3 = pre_mlp(x01) + pre_unet(x01)           # [T,3,H,W]
+    y01 = bound_pre(y3)                          # [T,3,H,W] in [0,1]
+
+    # pad to multiples of align
+    pad_h = (align - H % align) % align
+    pad_w = (align - W % align) % align
+    if pad_h or pad_w:
+        y_pad = F.pad(y01, (0, pad_w, 0, pad_h), mode="replicate")
+    else:
+        y_pad = y01
+    return y_pad, (H, W)
+
+
+def sandwich_rgb_to_planes(
+    y_hat: torch.Tensor,                          # [T,3,Hp,Wp], decoder output (float in [0,1])
+    orig_size: Tuple[int,int],                    # (H, W) before pad (from sandwich_planes_to_rgb)
+    post_unet: torch.nn.Module,                  # SmallUNet(3->C)
+    post_mlp: torch.nn.Module,                   # MLP 1x1 (3->C)
+    post_bound: Optional[torch.nn.Module] = None # optional BoundedProjector(C)
+) -> torch.Tensor:
+    """
+    Learned unpack: crop pad -> postprocess to [T,C,H,W] (ideally still in [0,1]).
+    """
+    H, W = orig_size
+    y = y_hat[..., :H, :W]                       # [T,3,H,W]
+
+    x_rec = post_mlp(y) + post_unet(y)           # [T,C,H,W]
+    if post_bound is not None:
+        x_rec = post_bound(x_rec)                # keep it in [0,1] if you prefer
+    else:
+        # safe clamp for stability since codec can introduce tiny overshoots
+        x_rec = x_rec.clamp_(0.0, 1.0)
+    return x_rec
+
+
+# ======================== FEATURE PLANES (C=12) ========================
+def pack_planes_to_rgb(x: torch.Tensor, align: int = DCVC_ALIGN, mode: str = "flatten"):
+    """
+    x : [T, C, H, W], C == 12
+    -> y_pad : [T, 3, H2_pad, W2_pad] ; orig : (H2_orig, W2_orig)
+
+    modes:
+      - "mosaic":   3 groups of 4 channels; F.pixel_shuffle(scale=2) per group -> concat as RGB
+      - "flat4":    3 groups of 4 channels; tile each group into 2x2 mono -> concat as RGB
+      - "flatten":  tile channels to a mono 3x4 grid -> repeat to RGB (legacy)
+    """
+    T, C, H, W = x.shape
+    if mode not in ("mosaic", "flatten", "flat4"):
+        raise ValueError(f"pack: unknown mode '{mode}'")
+    if C != 12:
+        raise ValueError(f"pack: C must be 12 (got {C})")
+
+    if mode == "mosaic":
+        xg = x.view(T, 3, 4, H, W)
+        tiles = [F.pixel_shuffle(xg[:, g], 2) for g in range(3)]  # each [T,1,2H,2W]
+        y = torch.cat(tiles[::-1], dim=1)  # [T,3,2H,2W]  (B,G,R)→RGB-ish
+        h2, w2 = 2 * H, 2 * W
+
+    elif mode == "flat4":
+        # Tile each 4-ch group as 2x2 mono and map to one RGB channel
+        xg = x.view(T, 3, 4, H, W)                                 # [T,3,4,H,W]
+        mono = [rearrange(xg[:, g], 'T (r c) H W -> T 1 (r H) (c W)', r=2, c=2) for g in range(3)]
+        y = torch.cat(mono[::-1], dim=1)                           # [T,3,2H,2W]
+        h2, w2 = 2 * H, 2 * W
+
+    else:  # "flatten"
+        mono = rearrange(x, 'T (r c) H W -> T 1 (r H) (c W)', r=3, c=4)  # [T,1,3H,4W]
+        y = mono.repeat(1, 3, 1, 1)                                      # [T,3,3H,4W]
+        h2, w2 = 3 * H, 4 * W
+
+    # pad
+    pad_h = (align - h2 % align) % align
+    pad_w = (align - w2 % align) % align
+    y_pad = F.pad(y, (0, pad_w, 0, pad_h), mode='replicate')
+    return y_pad, (h2, w2)
+
+
+def unpack_rgb_to_planes(y_pad: torch.Tensor, C: int, orig_size: Tuple[int, int], mode: str = "flatten"):
+    """
+    Inverse of pack_planes_to_rgb for modes {"mosaic","flat4","flatten"}.
+      - mosaic : 3 groups of 4ch via pixel_shuffle(2) → pixel_unshuffle(2)
+      - flat4  : 3 groups of 4ch tiled 2x2 mono      → untile back to 4ch
+      - flatten: 12ch tiled as 3x4 mono               → untile back to 12ch
+    """
+    if mode not in ("mosaic", "flatten", "flat4"):
+        raise ValueError(f"unpack: unknown mode '{mode}'")
+
+    if C != 12:
+        raise ValueError(f"unpack({mode}): C must be 12 (got {C})")
+
+    H2, W2 = orig_size
+    y = y_pad[..., :H2, :W2]  # remove pad
+
+    if mode == "mosaic":
+        # y is [T,3,2H,2W]; pack used tiles[::-1] (B,G,R) so we split (b,g,r) and unshuffle (r,g,b)
+        b, g, r = y.split(1, dim=1)
+        blocks = [F.pixel_unshuffle(ch, 2) for ch in (r, g, b)]  # each -> [T,4,H,W]
+        return torch.cat(blocks, dim=1)  # [T,12,H,W]
+
+    elif mode == "flat4":
+        # y is [T,3,2H,2W]; pack used mono[::-1] so split (b,g,r), then untile in order (r,g,b)
+        if (H2 % 2) != 0 or (W2 % 2) != 0:
+            raise ValueError(f"unpack(flat4): orig_size {(H2,W2)} must be divisible by (2,2)")
+        H = H2 // 2
+        W = W2 // 2
+
+        b, g, r = y.split(1, dim=1)
+
+        def _untile_2x2(mono_1x: torch.Tensor) -> torch.Tensor:
+            # mono_1x: [T,1,2H,2W] -> [T,4,H,W] with (r=2,c=2)
+            return rearrange(mono_1x, 'T 1 (r H) (c W) -> T (r c) H W', r=2, c=2, H=H, W=W)
+
+        blocks = [_untile_2x2(ch) for ch in (r, g, b)]  # match pack's reverse order
+        return torch.cat(blocks, dim=1)  # [T,12,H,W]
+
+    else:  # "flatten"
+        # y is [T,3,3H,4W] but only the first channel carries data (repeated to RGB in pack)
+        mono = y[:, :1]  # [T,1,3H,4W]
+        if (H2 % 3) != 0 or (W2 % 4) != 0:
+            raise ValueError(f"unpack(flatten): orig_size {(H2,W2)} not divisible by (3,4)")
+        H = H2 // 3
+        W = W2 // 4
+        x = rearrange(mono, 'T 1 (r H) (c W) -> T (r c) H W', r=3, c=4, H=H, W=W)
+        return x
+
+
+# ======================== DENSITY (Dz=192) ========================
+def pack_density_to_rgb(d5: torch.Tensor, align: int = DCVC_ALIGN, mode: str = "flatten"):
+    """
+    d5: [1,1,Dy,Dx,Dz] (Dz must be 192 for 'mosaic'/'flat4')
+    -> y_pad: [1,3,H2_pad,W2_pad]; orig: (H2_orig,W2_orig)
+
+    modes:
+      - "mosaic":
+          • Map to [0,1], permute to [1,Dz,Dy,Dx]
+          • Split to 3 groups of 64, pixel_shuffle(scale=8) per group -> [1,1,8Dy,8Dx]
+          • Concat 3 groups as RGB -> [1,3,8Dy,8Dx]
+      - "flat4":
+          • Map to [0,1], permute to [1,Dz,Dy,Dx]
+          • Split to 3 groups of 64, tile each group into 8x8 mono -> [1,1,8Dy,8Dx]
+          • Concat 3 groups as RGB -> [1,3,8Dy,8Dx]
+      - "flatten" (legacy, unchanged):
+          • Map to [0,1], view as [1,C=Dy,H=Dx,W=Dz], row-wise tile to mono canvas -> repeat to RGB
+    """
+    assert d5.dim() == 5 and d5.shape[:2] == (1, 1), f"expected [1,1,Dy,Dx,Dz], got {tuple(d5.shape)}"
+    _, _, Dy, Dx, Dz = d5.shape
+
+    if mode not in ("flatten", "mosaic", "flat4"):
+        raise ValueError(f"pack_density_to_rgb: unknown mode '{mode}'")
+
+    if mode == "flatten":
+        d01 = dens_to01(d5)                       # [1,1,Dy,Dx,Dz]
+        d01_chw = d01.view(1, Dy, Dx, Dz)         # [1,C=Dy,H=Dx,W=Dz]
+        mono, (Hc, Wc) = tile_1xCHW(d01_chw)      # [Hc,Wc]
+        y = mono.unsqueeze(0).repeat(3, 1, 1).unsqueeze(0)  # [1,3,Hc,Wc]
+        h2, w2 = Hc, Wc
+
+    else:
+        # both "mosaic" and "flat4" need Dz == 192 (3 * 8 * 8)
+        if Dz != 192:
+            raise ValueError(f"{mode} expects Dz=192, got Dz={Dz}")
+
+        d01 = dens_to01(d5)                                     # [1,1,Dy,Dx,Dz]
+        x = d01.permute(0, 1, 4, 2, 3).reshape(1, Dz, Dy, Dx)   # [1,Dz,Dy,Dx]
+        xg = x.view(1, 3, 64, Dy, Dx)                           # 3 groups of 64
+
+        if mode == "mosaic":
+            # pixel shuffle (scale=8) per group: [1,64,Dy,Dx] -> [1,1,8Dy,8Dx]
+            planes = [F.pixel_shuffle(xg[:, g], 8) for g in range(3)]
+            y = torch.cat(planes[::-1], dim=1)                  # [1,3,8Dy,8Dx] (B,G,R)→RGB-ish)
+        else:  # "flat4"
+            # tile 8x8 channels -> [1,1,8Dy,8Dx]
+            mono = [rearrange(xg[:, g], 'B (r c) H W -> B 1 (r H) (c W)', r=8, c=8) for g in range(3)]
+            y = torch.cat(mono[::-1], dim=1)                    # [1,3,8Dy,8Dx]
+
+        h2, w2 = 8 * Dy, 8 * Dx
+
+    # pad to multiples of `align`
+    pad_h = (align - h2 % align) % align
+    pad_w = (align - w2 % align) % align
+    y_pad = F.pad(y, (0, pad_w, 0, pad_h), mode='replicate')
+    return y_pad, (h2, w2)
+
+
+# -------------------------------------------------------
+# Density: inverse of pack_density_to_rgb
+# -------------------------------------------------------
+def unpack_density_from_rgb(
+    y_pad: torch.Tensor, Dy: int, Dx: int, Dz: int, orig_size: Tuple[int, int], mode: str = "flatten"
+):
+    """
+    Inverse of pack_density_to_rgb.
+
+    Args:
+      y_pad:     [1,3,Hp,Wp] float01
+      Dy,Dx,Dz:  target density dims (Dz must be 192 for 'mosaic'/'flat4')
+      orig_size: (H2_orig, W2_orig) saved by the packer (crop size before pad)
+      mode:      'flatten' | 'mosaic' | 'flat4'
+    Returns:
+      d5: [1,1,Dy,Dx,Dz] in raw domain (still in [0,1] if you haven’t called dens_from01)
+           (call dens_from01 afterward to get [-5,30] range)
+    """
+    if mode not in ("flatten", "mosaic", "flat4"):
+        raise ValueError(f"unpack_density_from_rgb: unknown mode '{mode}'")
+
+    H2, W2 = orig_size
+    y = y_pad[..., :H2, :W2]  # [1,3,H2,W2]
+
+    if mode == "flatten":
+        # y is 3× repeated mono canvas (H2,W2) that was built by row-wise tiling
+        mono = y[:, 0].squeeze(0)                  # [H2,W2]
+        d01_chw = untile_to_1xCHW(mono, Dy, Dx, Dz)  # [1,Dy,Dx,Dz]
+        d5 = d01_chw.view(1, 1, Dy, Dx, Dz)
+        return d5
+
+    # For 'mosaic' and 'flat4', Dz must be 192 (3 groups * 64)
+    if Dz != 192:
+        raise ValueError(f"{mode} expects Dz=192, got Dz={Dz}")
+
+    b, g, r = y.split(1, dim=1)  # [1,1,H2,W2] each
+
+    if mode == "mosaic":
+        # inverse of per-group pixel_shuffle(scale=8)
+        def inv_shuffle_8(ch):
+            return F.pixel_unshuffle(ch, 8)       # [1,64,Dy,Dx]
+        g0 = inv_shuffle_8(r); g1 = inv_shuffle_8(g); g2 = inv_shuffle_8(b)  # order back to (0,1,2)
+        x = torch.cat([g0, g1, g2], dim=1)        # [1,192,Dy,Dx]
+    else:
+        # flat4: inverse of 8x8 tiling
+        def inv_tile_8x8(ch):
+            return rearrange(ch, 'B 1 (r H) (c W) -> B (r c) H W', r=8, c=8)  # [1,64,Dy,Dx]
+        g0 = inv_tile_8x8(r); g1 = inv_tile_8x8(g); g2 = inv_tile_8x8(b)
+        x = torch.cat([g0, g1, g2], dim=1)        # [1,192,Dy,Dx]
+
+    # Back to [1,1,Dy,Dx,Dz] (still in [0,1])
+    d01_5 = x.view(1, 1, Dz, Dy, Dx).permute(0, 1, 3, 4, 2).contiguous()  # [1,1,Dy,Dx,Dz]
+    return d01_5
+
+def normalize_planes(
+        seq, 
+        mode="global", 
+        global_range=(-20.0, 20.0), 
+        eps=1e-6):
+    """
+    Normalize tri-plane tensor to [0,1].
+    seq : [T,C,H,W] (float32/float16)
+    Returns:
+      seq_n    : normalized to [0,1]
+      c_min    : broadcastable min used
+      scale    : broadcastable (max-min)
+    """
+    if mode == "per_channel":
+        # per-channel min/max over T,H,W
+        c_min = seq.amin(dim=(0, 2, 3), keepdim=True)             # [1,C,1,1]
+        c_max = seq.amax(dim=(0, 2, 3), keepdim=True)
+    elif mode == "global":
+        lo, hi = global_range
+        c_min = torch.as_tensor(lo, dtype=seq.dtype, device=seq.device).view(1, 1, 1, 1)
+        c_max = torch.as_tensor(hi, dtype=seq.dtype, device=seq.device).view(1, 1, 1, 1)
+    else:
+        raise ValueError(f"Unknown quant_mode: {mode}")
+
+    scale = (c_max - c_min).clamp_(eps)
+    seq_n = ((seq - c_min) / scale).clamp_(0, 1)
+    return seq_n, c_min, scale
+
+
+# ------------------------------------------------------------------
+
+def pad_to_align(x, align=DCVC_ALIGN, mode="replicate"):
+    """
+    x : [B,3,H,W]  -> pad bottom/right so H,W are multiples of `align`.
+    Returns y_pad, (H_orig, W_orig)
+    """
+    B, C, H, W = x.shape
+    pad_h = (align - H % align) % align
+    pad_w = (align - W % align) % align
+    y = F.pad(x, (0, pad_w, 0, pad_h), mode=mode)
+    return y, (H, W)
+
+
+def crop_from_align(x, orig_size):
+    """
+    x : [B,3,H_pad,W_pad] ; orig_size=(H_orig, W_orig)
+    """
+    H, W = orig_size
+    return x[..., :H, :W]
+
+
+# ===== Density helpers (packing/unpacking) =====
+def dens_to01(d: torch.Tensor) -> torch.Tensor:
+    # fixed global mapping used in your packer
+    return (d.clamp(-5.0, 30.0) + 5.0) / 35.0
+
+def dens_from01(t01: torch.Tensor) -> torch.Tensor:
+    return t01 * 35.0 - 5.0
+
+def tile_1xCHW(feat: torch.Tensor):
+    """[1,C,H,W] -> mono canvas [Hc,Wc], row-wise."""
+    assert feat.dim() == 4 and feat.size(0) == 1
+    _, C, H, W = feat.shape
+    tiles_w = int(math.ceil(math.sqrt(C)))
+    tiles_h = int(math.ceil(C / tiles_w))
+    Hc, Wc = tiles_h * H, tiles_w * W
+    canvas = feat.new_zeros(Hc, Wc)
+    filled = 0
+    for r in range(tiles_h):
+        y = 0
+        for c in range(tiles_w):
+            if filled >= C:
+                break
+            canvas[r*H:(r+1)*H, y:y+W] = feat[0, filled]
+            y += W
+            filled += 1
+    return canvas, (Hc, Wc)
+
+def untile_to_1xCHW(canvas: torch.Tensor, C: int, H: int, W: int) -> torch.Tensor:
+    """inverse of _tile_1xCHW"""
+    Hc, Wc = canvas.shape[-2:]
+    tiles_h = Hc // H
+    tiles_w = Wc // W
+    out = canvas.new_zeros(1, C, H, W)
+    filled = 0
+    for r in range(tiles_h):
+        y = 0
+        for c in range(tiles_w):
+            if filled >= C:
+                break
+            out[0, filled] = canvas[r*H:(r+1)*H, y:y+W]
+            y += W
+            filled += 1
+    return out
+
+
+
+    # Exception: {'single_slice_intra_refresh': 1, 'support_alpha_layer_encoding': 0, 
+    # 'support_emphasis_level_map': 0, 'output_block_stats': 0, 'support_temporal_aq': 0, 
+    # 'support_weighted_prediction': 1, 'support_lookahead': 1, 'support_sao': 1, 
+    # 'support_lossless_encode': 1, 'support_yuv444_encode': 1, 'support_multiple_ref_frames': 0, 
+    # 'mb_num_max': 262144, 'output_row_stats': 0, 'async_encode_support': 0, 
+    # 'preproc_support': 0, 'support_hierarchical_bframes': 0, 'support_10bit_encode': 1, 
+    # 'support_hierarchical_pframes': 0, 'support_yuv422_encode': 0, 'support_bdirect_mode': 0, 
+    # 'level_max': 186, 'support_dynamic_slice_mode': 1, 'support_ref_pic_invalidation': 1, 
+    # 'support_cabac': 1, 'support_qpelmv': 1, 'separate_colour_plane': 0, 'support_dyn_res_change': 1, 
+    # 'support_fmo': 0, 'num_max_bframes': 0, 'support_monochrome': 0, 'num_encoder_engines': 3, 
+    # 'mb_per_sec_max': 983040, 'support_field_encoding': 0, 'supported_ratecontrol_modes': 63, 
+    # 'height_min': 33, 'width_min': 65, 'width_max': 8192, 'support_bframe_ref_mode': 0, 
+    # 'num_max_ltr_frames': 7, 'num_max_temporal_layers': 4, 'support_adaptive_transform': 0, 
+    # 'height_max': 8192, 'disable_enc_state_advance': 0, 'level_min': 30, 
+    # 'support_dyn_bitrate_change': 1, 'support_dyn_force_constqp': 1, 
+    # 'support_stereo_mvc': 0, 'support_dyn_rcmode_change': 0, 'output_recon_surface': 0, 
+    # 'support_subframe_readback': 1, 'unknown': 0, 'support_temporal_svc': 1, 
+    # 'support_constrained_encoding': 1, 'support_intra_refresh': 1, 
+    # 'dynamic_query_encoder_capacity': 100, 'support_meonly_mode': 1, 
+    # 'support_custom_vbv_buf_size': 1}

@@ -10,24 +10,39 @@ from tqdm import tqdm, trange
 import numpy as np
 import imageio
 from mmengine.config import Config
-import wandb
 
-from TeTriRF.lib import dvgo, dmpigo, dvgo_video, utils      # unchanged
-from TeTriRF.lib.load_data import load_data
+REPO_ROOT = Path(__file__).resolve().parents[2] # the CATRF repo
+CATRF_DYNAMIC_ROOT = REPO_ROOT / "catrf_dynamic"
+THIRD_PARTY_ROOT = REPO_ROOT / "third_party"
+TETRIRF_ROOT = THIRD_PARTY_ROOT / "TeTriRF"
+
+for path in (REPO_ROOT, THIRD_PARTY_ROOT, TETRIRF_ROOT):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+from third_party.TeTriRF.lib import dvgo, dmpigo, dvgo_video, utils
+from third_party.TeTriRF.lib.load_data import load_data
 from torch_efficient_distloss import flatten_eff_distloss
 
-from src.data_loader.sampler import MultiBucketCycleSampler
+from catrf_dynamic.data.sampler import MultiBucketCycleSampler
 
-"""
-Usage:
-    python train_seq_triplane.py --config configs/NHR/sport1.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 --training_mode 1
-    python train_seq_triplane.py --config configs/dynerf_coffee_martini/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9  --training_mode 1
-    python train_seq_triplane.py --config configs/dynerf_cut_roasted_beef/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9  --training_mode 1
-    python train_seq_triplane.py --config configs/dynerf_cook_spinach/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9  --training_mode 1
-    python train_seq_triplane.py --config configs/n3d_flame_steak/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19   --training_mode 1
-"""
+def force_outputs_under_catrf_dynamic(cfg: Config, default_subdir: str = "outputs/vanilla_n3d") -> None:
+    """Force checkpoints/renders to be saved under CATRF/catrf_dynamic.
+    """
+    raw_basedir = getattr(cfg, "basedir", None)
 
-WANDB = True
+    if raw_basedir is None or str(raw_basedir).strip() == "":
+        rel_basedir = Path(default_subdir)
+    else:
+        raw_basedir = Path(str(raw_basedir))
+
+        if raw_basedir.is_absolute():
+            rel_basedir = Path(default_subdir) / raw_basedir.name
+        else:
+            rel_basedir = raw_basedir
+
+    cfg.basedir = str((CATRF_DYNAMIC_ROOT / rel_basedir).resolve())
 
 # ------------------------------------------------------------------------------
 # 2. Argument & config handling
@@ -102,8 +117,6 @@ class Trainer:
     def __post_init__(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self._build_model_and_opt()
-        if WANDB:
-            wandb.watch(self.model, log="all", log_freq=self.args.i_print)
         self._build_rays()
 
     def _build_model_and_opt(self):
@@ -287,12 +300,6 @@ class Trainer:
                 psnr = np.mean(self._psnr_buffer); self._psnr_buffer.clear()
                 tqdm.write(f'[step {step:6d}] loss {loss.item():.4e}  psnr {psnr:5.2f}  '
                            f'elapsed {dt/3600:02.0f}:{dt/60%60:02.0f}:{dt%60:02.0f}')
-                if WANDB:
-                    wandb.log({
-                        "train/psnr": float(psnr),
-                        "train/loss": float(loss.item()),
-                        "time/elapsed_s": dt,
-                    }, step=step)
 
                 # raise Exception("Stop here")
 
@@ -308,18 +315,13 @@ if __name__ == '__main__':
     cfg  = Config.fromfile(args.config)
     cfg.data.frame_ids = args.frame_ids
 
-    if WANDB:
-        wandb.init(
-          project=cfg.wandbprojectname,
-          name=cfg.expname,
-          config=vars(args)
-        )
+    force_outputs_under_catrf_dynamic(cfg, default_subdir="outputs/vanilla_n3d")
+    print(f"[CATRF] Outputs will be saved to: {os.path.join(cfg.basedir, cfg.expname)}")
 
     if torch.cuda.is_available():
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     seed_everything(args.seed)
-
     data = load_dataset(cfg)
     if not args.render_only:
         Trainer(cfg, args, data).train()

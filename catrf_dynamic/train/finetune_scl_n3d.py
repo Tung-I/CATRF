@@ -10,41 +10,45 @@ from tqdm import tqdm, trange
 import numpy as np
 import imageio
 from mmengine.config import Config
-import wandb
-import math
 
-from src.utils.common import setup_unique_torch_extensions_dir
-from src.models.ste_dvgo_video import STE_DVGO_Video
-# setup_unique_torch_extensions_dir()
-
-from TeTriRF.lib.utils import debug_print_param_status
-from TeTriRF.lib import dvgo, dvgo_video, dcvc_dvgo_video, utils      # unchanged
-from TeTriRF.lib.load_data import load_data
 from torch_efficient_distloss import flatten_eff_distloss
 
-WANDB=True
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CATRF_DYNAMIC_ROOT = REPO_ROOT / "catrf_dynamic"
+THIRD_PARTY_ROOT = REPO_ROOT / "third_party"
+TETRIRF_ROOT = THIRD_PARTY_ROOT / "TeTriRF"
+DCVC_RT_SRC_ROOT = THIRD_PARTY_ROOT / "dcvc_rt" / "src"
 
-"""
-Usage:
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/dcvc_qp48.py --frame_ids 0 1 2 3 4 5 6 7 8 9
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp20.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp44_mosaic_affine_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/hevc_qp36_flatten_affine.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp52_k16.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp26_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/dcvc_qp24_flat4_absmax_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp62_gop10_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 
-    python train_codec_nerf_video.py --config configs/nhr_sport1/av1_qp44.py --frame_ids 0 1 2 3 4 5 6 7 8 9 
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/hevc_qp44_gop10_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 
-    python train_codec_nerf_video.py --config configs/nhr_sport1/dcvc_qp24.py --frame_ids 0 1 2 3 4 5 6 7 8 9 
-    python train_codec_nerf_video.py --config configs/dynerf_sear_steak/av1_qp50.py --frame_ids 0 1 2 3 4 5 6 7 8 9
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp44_flat4_absmax_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp44_mosaic_absmax_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9
-    python train_codec_nerf_video.py --config configs/dynerf_flame_salmon/av1_qp32.py --frame_ids 0 1 2 3 4 5 6 7 8 9
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/pynv_hevc_qp32_gop10.py --frame_ids 0 1 2 3 4 5 6 7 8 9
+for path in (REPO_ROOT, THIRD_PARTY_ROOT, TETRIRF_ROOT, DCVC_RT_SRC_ROOT):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
 
+from third_party.TeTriRF.lib import dvgo, dvgo_video, dcvc_dvgo_video, utils
+from third_party.TeTriRF.lib.load_data import load_data
+from torch_efficient_distloss import flatten_eff_distloss
+
+from catrf_dynamic.models.ste_dvgo_video import STE_DVGO_Video
+
+def force_outputs_under_catrf_dynamic(cfg: Config, default_subdir: str = "outputs/scl_n3d") -> None:
+    """Force checkpoints/renders to be saved under CATRF/catrf_dynamic.
+
+    This prevents codec fine-tuning results from being written directly under
+    the CATRF repo root.
     """
+    raw_basedir = getattr(cfg, "basedir", None)
 
+    if raw_basedir is None or str(raw_basedir).strip() == "":
+        rel_basedir = Path(default_subdir)
+    else:
+        raw_basedir = Path(str(raw_basedir))
+
+        if raw_basedir.is_absolute():
+            rel_basedir = Path(default_subdir) / raw_basedir.name
+        else:
+            rel_basedir = raw_basedir
+
+    cfg.basedir = str((CATRF_DYNAMIC_ROOT / rel_basedir).resolve())
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -101,30 +105,8 @@ class Trainer:
     def __post_init__(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self._build_model_and_opt()
-
-        # debug_print_param_status(self.model, self.optimizer)
-        # raise Exception
-    
         self._build_rays()
         self.lambda_bpp = self.qp_to_lambda()
-        
-        """
-        # for _qp in [0, 12, 24, 48]:
-        #     print(f"lambda_bpp[{_qp}] = {self.qp_to_lambda(_qp)}")
-        # raise Exception('')
-        lambda_bpp[0] = 1.0
-        lambda_bpp[12] = 3.544807152675064
-        lambda_bpp[24] = 12.565657749656294
-        lambda_bpp[48] = 157.8957546814973
-        """
-
-        if WANDB:
-            wandb.watch(self.model, log="all", log_freq=self.args.i_log)
-
-    def _collect_perf_stats_for_wandb(self, frameid: int, global_step: int) -> Dict[str, float]:
-        if hasattr(self.model, "get_perf_stats_for_wandb"):
-            return self.model.get_perf_stats_for_wandb(frameid=frameid, global_step=global_step)
-        return {}
 
     def _build_model_and_opt(self):
         xyz_min = torch.tensor(self.cfg.data.xyz_min)
@@ -332,26 +314,6 @@ class Trainer:
                 tqdm.write(f'[step {step:6d}] loss {loss.item():.4e}  psnr {psnr:5.2f} '
                            f'elapsed {dt/3600:02.0f}:{dt/60%60:02.0f}:{dt%60:02.0f}')
                 
-                # raise Exception("Stop here")
-
-            if step % self.args.i_log == 0 and WANDB:
-                log_dict = {
-                    "train/psnr": float(psnr),
-                    "train/loss": float(loss.item()),
-                    "train/feature_plane_psnr": float(plane_psnr_dict['xy']),
-                    "train/feature_plane_psnr": float(plane_psnr_dict['xz']),
-                    "train/feature_plane_psnr": float(plane_psnr_dict['yz']),
-                    "train/density_plane_psnr": float(plane_psnr_dict['density']),
-                    "train/rec_loss": float(rec_loss.item()),
-                    "train/avg_bpp": float(avg_bpp),
-                    "time/elapsed_s": float(dt),
-                }
-
-                # richer codec + render perf stats
-                log_dict.update(self._collect_perf_stats_for_wandb(frameid=current_fid, global_step=step))
-
-                wandb.log(log_dict, step=step)
-
             if step % cfg_t.save_every == 0 and step >= cfg_t.save_after:
                 self.model.save_checkpoints()
 
@@ -362,22 +324,18 @@ class Trainer:
 # ------------------------------------------------------------------------------
 if __name__ == '__main__':
     args = build_arg_parser().parse_args()
-    cfg  = Config.fromfile(args.config)
+
+    cfg = Config.fromfile(args.config)
     cfg.data.frame_ids = args.frame_ids
 
-    # initialize wandb
-    if WANDB:
-        wandb.init(
-        project=cfg.wandbprojectname,
-        name=cfg.expname,
-        config=vars(args)
-        )
+    force_outputs_under_catrf_dynamic(cfg, default_subdir="outputs/scl_n3d")
+    print(f"[CATRF] Outputs will be saved to: {os.path.join(cfg.basedir, cfg.expname)}")
 
     if torch.cuda.is_available():
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     seed_everything(args.seed)
-
     data = load_dataset(cfg)
+
     if not args.render_only:
         Trainer(cfg, args, data).train()
