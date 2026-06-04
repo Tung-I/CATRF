@@ -16,14 +16,74 @@ CATRF is a standard-codec-in-the-loop training framework for plane-factorized ra
 
 The training of CATRF consists of two major stages:
 
-1. Vanilla TriPlane pre-training
-Train the static/dynamic TriPlane radiance field backbone without codec artifacts.
-2. Standard-codec-in-the-loop fine-tuning
-Quantize and pack learned feature planes into codec-compatible 2D canvases, run a standard codec roundtrip, unpack/dequantize the decoded planes, and optimize the rendered reconstruction quality using a straight-through estimator (STE). This adapts TriPlanes to standard codec compression artifacts. The resulting TriPlanes can then be compressed into compact bitstreams using standard codecs without comprimising rendering quality after decompression.
+1. Vanilla TriPlane pre-training: Train the static/dynamic TriPlane radiance field backbone without codec artifacts.
 
-### Volumetirc image Compression Performance
+2. Standard-codec-in-the-loop fine-tuning: Quantize and pack learned feature planes into codec-compatible 2D canvases, run a standard codec roundtrip, unpack/dequantize the decoded planes, and optimize the rendered reconstruction quality using a straight-through estimator (STE). This adapts TriPlanes to standard codec compression artifacts. The resulting TriPlanes can then be compressed into compact bitstreams using standard codecs without comprimising rendering quality after decompression.
 
-### Volumetric video Compression Performance
+## :hammer: Usage -- catrf_dynamic
+
+For each step, click it to expand and view details.
+
+<details>
+  <summary><font size="5"> Prerequisites</font></summary><br>
+
+* Python 3.12 
+* CUDA 11.8 (other versions may also work. Make sure the CUDA version matches with pytorch.)
+* Pytorch 
+* Environment
+    ```
+    conda create -n $YOUR_PY_ENV_NAME python=3.12
+    conda activate $YOUR_PY_ENV_NAME
+
+    pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu118
+    cd envs
+    pip install -r dynamic_requirements.txt
+    ```
+
+</details>
+
+<details>
+
+  <summary><font size="5"> Dataset Preprocessing</font></summary><br>
+
+* This code supports the DyNeRF dataset
+* Please follow the same dataset preprocessing step of [TeTriRF](https://github.com/wuminye/TeTriRF)
+* The expected data folder architecture:
+    ```
+    catrf_dynamic
+    - data
+    - - n3d
+    - - flame_steak
+    - - sear_steak
+    - - - llff
+    - - - - 0
+    - - - - - images
+    - - - - - poses_bounds.npy
+    - - - - 1
+    - - - - 2
+    - - - - ...
+    ```
+</details>
+
+<details>
+
+  <summary><font size="5"> Pre-training</font></summary><br>
+
+* E.g., GoP=15:
+    ```
+    python train_seq_triplane.py --config configs/dynerf_cook_spinach/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
+    ```
+</details>
+
+<details>
+
+  <summary><font size="5"> SCL fine-tuning</font></summary><br>
+
+* E.g., GoP=15:
+    ```
+    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp44_mosaic_affine_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 
+    ```
+</details>
 
 ## Environment Setup
 

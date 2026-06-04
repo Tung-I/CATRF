@@ -1,7 +1,7 @@
 _base_ = '../default.py'
-expname = 'hevc_qp44_gop10_tv'
+expname = 'pynv_hevc_qp44'
 ckptname = 'flame_steak_video_ds3'
-wandbprojectname = 'ste_flame_steak'
+wandbprojectname = 'pynv_flame_steak'
 basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_flame_steak'
 
 data = dict(
@@ -28,27 +28,45 @@ fine_model_and_render = dict(
 )
 
 codec = dict(
-    name = 'HEVCVideoCodec',
-    ckpt_path = None,
+    name='PyNvVideoCodecWrapper',
+
+    ckpt_path=None,
     train_mode='ste',
-    unet_pre_base = 32,             # UNet width
-    unet_post_base = 32,
-    in_channels = 12,  
+
+    unet_pre_base=32,
+    unet_post_base=32,
+    in_channels=12,
+
     convert_ycbcr=True,
-    dcvc_qp = None,
-    quant_mode = "global",
-    global_range = (-20.0, 20.0),
-    packing_mode = "flatten",
+    dcvc_qp=None,
+
+    quant_mode="global",
+    global_range=(-20.0, 20.0),
+    packing_mode="flatten",
+
     use_amp=True,
     quality=None,
-    codec_refresh_k = 128,
-    refresh_trigger_eps = 0.05,  # e.g., 0.05 to refresh early if planes drift >5% L2
-    gop = 20,
-    fps = 30,
-    pix_fmt = 'yuv444p',
-    hevc_qp = 44,
-    vp9_qp = None,
-    av1_qp = None,
+
+    codec_refresh_k=128,
+    refresh_trigger_eps=0.05,
+
+    gop=20,
+    fps=30,
+    pix_fmt='NV12',
+
+    hevc_qp=44,
+    av1_qp=None,
+    vp9_qp=None,
+
+    gpu_id=0,
+    hw_preset='p4',
+    hw_tune='high_quality',
+
+    absmax_lo=-20.0,
+    absmax_hi=20.0,
+    affine_lo_p=0.5,
+    affine_hi_p=99.5,
+    affine_eps=1e-6,
 )
 
 _k = 1

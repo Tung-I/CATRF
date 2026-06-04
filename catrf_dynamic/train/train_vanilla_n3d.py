@@ -37,7 +37,7 @@ def build_arg_parser():
     p.add_argument('--config', required=True)
     p.add_argument('--frame_ids', nargs='+', type=int, help='List of frame IDs')
     p.add_argument("--seed", type=int, default=777)
-    p.add_argument("--training_mode", type=int, default=0)
+    p.add_argument("--training_mode", type=int, default=1)
     # misc I/O
     p.add_argument("--i_print", type=int, default=100)
     p.add_argument("--render_only", action='store_true')

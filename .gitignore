@@ -1,0 +1,17 @@
+*.pyc
+.vscode/
+*.bin
+*.png
+*.so
+build/
+*.tar
+*.pyd
+*.egg-info
+
+catrf_dynamic/checkpoints/*
+catrf_dynamic/results/*
+catrf_dynamic/logs/*
+catrf_dynamic/data/*
+
+third_party/TeTriRF/logs/*
+third_party/TeTriRF/results/*
