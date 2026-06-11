@@ -2,7 +2,7 @@
 dataset_name = blender
 datadir = ./data/nerf_synthetic/ship
 expname =  tensorste_ship_jpeg10
-basedir = ./logs
+basedir = ./catrf_static/logs
 
 # === training ===
 n_iters = 20000

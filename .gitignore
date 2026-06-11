@@ -1,17 +1,40 @@
+# Python
 *.pyc
-.vscode/
-*.bin
-*.png
-*.so
-build/
-*.tar
 *.pyd
 *.egg-info
+__pycache__/
 
-catrf_dynamic/checkpoints/*
-catrf_dynamic/results/*
-catrf_dynamic/logs/*
-catrf_dynamic/data/*
+# Editors / IDE
+.vscode/
 
-third_party/TeTriRF/logs/*
-third_party/TeTriRF/results/*
+# Compiled extensions
+*.so
+*.bin
+build/
+
+# Model checkpoints (all common formats)
+*.th
+*.pth
+*.tar
+*.ckpt
+*.safetensors
+
+# catrf_dynamic outputs
+catrf_dynamic/logs/
+catrf_dynamic/checkpoints/
+catrf_dynamic/results/
+catrf_dynamic/data/
+
+# catrf_static outputs
+catrf_static/logs/
+catrf_static/data/
+
+# third-party logs
+third_party/TeTriRF/logs/
+third_party/TeTriRF/results/
+
+# Rendered images produced during training (under logs/)
+# Note: assets/ images (pipeline.png etc.) are intentionally tracked.
+*.png
+*.jpg
+*.jpeg

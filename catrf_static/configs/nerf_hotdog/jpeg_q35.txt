@@ -2,7 +2,7 @@
 dataset_name = blender
 datadir = ./data/nerf_synthetic/hotdog
 expname =  tensorste_hotdog_jpeg35
-basedir = ./logs
+basedir = ./catrf_static/logs
 
 # === training ===
 n_iters = 20000

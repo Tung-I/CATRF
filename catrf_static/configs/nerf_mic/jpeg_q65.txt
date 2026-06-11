@@ -2,7 +2,7 @@
 dataset_name = blender
 datadir = ./data/nerf_synthetic/mic
 expname =  tensorste_mic_jpeg65
-basedir = ./logs
+basedir = ./catrf_static/logs
 
 # === training ===
 n_iters = 20000

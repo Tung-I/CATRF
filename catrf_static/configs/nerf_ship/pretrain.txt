@@ -2,7 +2,7 @@
 dataset_name = blender
 datadir = ./data/nerf_synthetic/ship
 expname =  tensorf_ship_VM_codec
-basedir = ./logs
+basedir = ./catrf_static/logs
 
 n_iters = 80000
 batch_size = 4096

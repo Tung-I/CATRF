@@ -2,7 +2,7 @@
 dataset_name = blender
 datadir = ./data/nerf_synthetic/drums
 expname =  tensorste_drums_jpeg20
-basedir = ./logs
+basedir = ./catrf_static/logs
 
 # === training ===
 n_iters = 20000

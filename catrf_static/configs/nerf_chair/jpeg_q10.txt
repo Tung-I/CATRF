@@ -1,7 +1,7 @@
 dataset_name = blender
 datadir = ./data/nerf_synthetic/chair
 expname =  tensorste_chair_jpeg10
-basedir = ./logs
+basedir = ./catrf_static/logs
 
 # === training ===
 n_iters = 20000
