@@ -2,7 +2,7 @@
 
 # CATRF: Codec-Adaptive TriPlane Radiance Fields for Volumetric Content Delivery
 
-**CVPR2026 Findings**
+**CVPR 2026 Findings**
 
 </div>
 
@@ -11,155 +11,156 @@
 
 <img src="assets/pipeline.png" width="500">
 
-## :book: Overview
-CATRF is a standard-codec-in-the-loop training framework for plane-factorized radiance fields. This folder contains both the static-scene and dynamic-scene implementation of CATRF. For static scenes, the static_catrf branch builds on a TensoRF backbone and fine-tunes the learned feature planes through JPEG. For dynamic scenes, this branch builds on a TeTriRF-style temporal TriPlane radiance field backbone and fine-tunes the learned feature planes through real standard video codec roundtrips, including AV1, HEVC, and VP9.
+## Overview
 
-The training of CATRF consists of two major stages:
+CATRF is a standard-codec-in-the-loop training framework for plane-factorized radiance fields. The repository contains two independent implementations:
 
-1. Vanilla TriPlane pre-training: Train the static/dynamic TriPlane radiance field backbone without codec artifacts.
+- **`catrf_static/`** — static scenes. TensoRF backbone, JPEG straight-through estimator (STE). Evaluated on NeRF-Synthetic.
+- **`catrf_dynamic/`** — dynamic scenes. TeTriRF-style temporal TriPlane backbone, standard video codec STE (AV1, HEVC, VP9). Evaluated on DyNeRF (N3D).
 
-2. Standard-codec-in-the-loop fine-tuning: Quantize and pack learned feature planes into codec-compatible 2D canvases, run a standard codec roundtrip, unpack/dequantize the decoded planes, and optimize the rendered reconstruction quality using a straight-through estimator (STE). This adapts TriPlanes to standard codec compression artifacts. The resulting TriPlanes can then be compressed into compact bitstreams using standard codecs without comprimising rendering quality after decompression.
+Training consists of two stages for both branches:
 
-## :hammer: Usage -- catrf_static
+1. **Vanilla pre-training** — train the TriPlane backbone without codec artifacts.
+2. **Codec-in-the-loop fine-tuning** — pack feature planes into codec-compatible 2-D canvases, run a standard codec round-trip, unpack and dequantize, then back-propagate through the codec via a straight-through estimator (STE). This adapts the TriPlanes to codec compression artifacts so that rendering quality is preserved after standard-codec compression.
 
-For each step, click it to expand and view details.
+---
 
-<details>
-  <summary><font size="5"> Prerequisites</font></summary><br>
+## catrf_static
 
-* Python 3.8+
-* CUDA 11.8
-* Environment
-    ```
-    conda create -n catrf_static python=3.8
-    conda activate catrf_static
+### Prerequisites
 
-    pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu118
-    pip install tqdm scikit-image opencv-python configargparse lpips imageio-ffmpeg kornia
-    pip install pytorch_msssim compressai wandb tensorboard
-    ```
+- Python 3.8, CUDA 11.8
 
-</details>
+```bash
+conda create -n catrf_static python=3.8
+conda activate catrf_static
 
-<details>
+pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu118
+pip install tqdm scikit-image opencv-python configargparse lpips imageio-ffmpeg kornia
+pip install pytorch_msssim compressai wandb tensorboard
+```
 
-  <summary><font size="5"> Dataset Preprocessing</font></summary><br>
+A full pinned environment is available at `envs/static_requirements.txt`.
 
-* This code supports the NeRF-Synthetic dataset
-* Download from the [NeRF project page](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1)
-* The expected data folder architecture:
-    ```
-    catrf_static
-    - data
-    - - nerf_synthetic
-    - - - chair
-    - - - drums
-    - - - ficus
-    - - - hotdog
-    - - - lego
-    - - - materials
-    - - - mic
-    - - - ship
-    ```
-</details>
+### Dataset
 
-<details>
+This branch supports the **NeRF-Synthetic** dataset (8 scenes: chair, drums, ficus, hotdog, lego, materials, mic, ship).
 
-  <summary><font size="5"> Pre-training</font></summary><br>
+Download from the [NeRF project page](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1) and place under `catrf_static/data/`:
 
-* E.g., lego scene:
-    ```
-    python catrf_static/train/train_tensorf.py --config catrf_static/configs/nerf_lego/pretrain.txt
-    ```
-</details>
+```
+catrf_static/
+└── data/
+    └── nerf_synthetic/
+        ├── chair/
+        ├── drums/
+        ├── ficus/
+        ├── hotdog/
+        ├── lego/
+        ├── materials/
+        ├── mic/
+        └── ship/
+```
 
-<details>
+### Stage 1 — TensoRF pre-training
 
-  <summary><font size="5"> SCL fine-tuning (JPEG)</font></summary><br>
+Run from the repo root. Replace `nerf_lego` with any of the eight scene names.
 
-* E.g., lego scene at JPEG quality 20:
-    ```
-    python catrf_static/train/train_ste.py --config catrf_static/configs/nerf_lego/jpeg_q20.txt \
-        --ckpt ./logs/tensorf_lego_VM_codec/tensorf_lego_VM_codec.th \
-        --compression --batch_size 65536 --codec_training \
-        --lr_decay_target_ratio 1 --n_iters 30000
-    ```
-</details>
+```bash
+python catrf_static/train/train_tensorf.py \
+    --config catrf_static/configs/nerf_lego/pretrain.txt
+```
 
-## :hammer: Usage -- catrf_dynamic
+The checkpoint is saved to `catrf_static/logs/tensorf_lego_VM_codec/tensorf_lego_VM_codec.th`.
 
-For each step, click it to expand and view details.
+### Stage 2 — JPEG STE fine-tuning
 
-<details>
-  <summary><font size="5"> Prerequisites</font></summary><br>
+Available quality levels: `jpeg_q10`, `jpeg_q20`, `jpeg_q35`, `jpeg_q50`, `jpeg_q65`.
 
-* Python 3.12 
-* CUDA 11.8 (other versions may also work. Make sure the CUDA version matches with pytorch.)
-* Pytorch 
-* Environment
-    ```
-    conda create -n $YOUR_PY_ENV_NAME python=3.12
-    conda activate $YOUR_PY_ENV_NAME
+```bash
+python catrf_static/train/train_ste.py \
+    --config catrf_static/configs/nerf_lego/jpeg_q20.txt \
+    --ckpt catrf_static/logs/tensorf_lego_VM_codec/tensorf_lego_VM_codec.th \
+    --compression --batch_size 65536 \
+    --lr_decay_target_ratio 1 --n_iters 30000
+```
 
-    pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu118
-    cd envs
-    pip install -r dynamic_requirements.txt
-    ```
+---
 
-</details>
+## catrf_dynamic
 
-<details>
+### Prerequisites
 
-  <summary><font size="5"> Dataset Preprocessing</font></summary><br>
+- Python 3.12, CUDA 11.8
 
-* This code supports the DyNeRF dataset
-* Please follow the same dataset preprocessing step of [TeTriRF](https://github.com/wuminye/TeTriRF)
-* The expected data folder architecture:
-    ```
-    catrf_dynamic
-    - data
-    - - n3d
-    - - flame_steak
-    - - sear_steak
-    - - - llff
-    - - - - 0
-    - - - - - images
-    - - - - - poses_bounds.npy
-    - - - - 1
-    - - - - 2
-    - - - - ...
-    ```
-</details>
+```bash
+conda create -n catrf_dynamic python=3.12
+conda activate catrf_dynamic
 
-<details>
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu118
+pip install -r envs/dynamic_requirements.txt
+```
 
-  <summary><font size="5"> Pre-training</font></summary><br>
+### Dataset
 
-* E.g., GoP=15:
-    ```
-    python catrf_dynamic/train/train_vanilla_n3d.py --config catrf_dynamic/configs/n3d/dynerf_cook_spinach/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
-    ```
-</details>
+This branch supports the **DyNeRF / N3D** dataset (6 scenes: coffee_martini, cook_spinach, cut_roasted_beef, flame_salmon, flame_steak, sear_steak).
 
-<details>
+Follow the preprocessing steps from [TeTriRF](https://github.com/wuminye/TeTriRF) and place data under `catrf_dynamic/data/`:
 
-  <summary><font size="5"> SCL fine-tuning</font></summary><br>
+```
+catrf_dynamic/
+└── data/
+    └── n3d/
+        ├── flame_steak/
+        │   └── llff/
+        │       ├── 0/
+        │       │   ├── images/
+        │       │   └── poses_bounds.npy
+        │       ├── 1/
+        │       └── ...
+        ├── sear_steak/
+        └── ...  (one sub-directory per scene, same structure)
+```
 
-* E.g., GoP=15:
-    ```
-    python catrf_dynamic/train/finetune_scl_n3d.py --config catrf_dynamic/configs/n3d/dynerf_flame_steak/av1_qp44.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
-    ```
-</details>
+### Stage 1 — TeTriRF pre-training
 
+`--frame_ids` specifies the GoP. The example below trains a GoP of 15 frames.
 
+```bash
+python catrf_dynamic/train/train_vanilla_n3d.py \
+    --config catrf_dynamic/configs/n3d/dynerf_flame_steak/video.py \
+    --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
+```
+
+### Stage 2 — Video codec STE fine-tuning
+
+Available codec configs per scene:
+
+| Codec | QP options |
+|-------|-----------|
+| AV1   | qp32, qp38, qp44, qp50 |
+| HEVC  | qp28, qp32, qp36, qp40, qp44 |
+| VP9   | qp32, qp36, qp40, qp44 |
+
+```bash
+python catrf_dynamic/train/finetune_scl_n3d.py \
+    --config catrf_dynamic/configs/n3d/dynerf_flame_steak/av1_qp44.py \
+    --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
+```
+
+Replace `av1_qp44` with any config listed above, e.g. `hevc_qp32`, `vp9_qp40`.
+
+---
 
 ## Acknowledgements
 
-The static branch builds on [NeRFCodec](https://github.com/JasonLSC/NeRFCodec_public) and the dynamic branch builds on [TeTriRF](https://github.com/wuminye/TeTriRF).
+The static branch builds on [NeRFCodec](https://github.com/JasonLSC/NeRFCodec_public) and [TensoRF](https://github.com/apchenstu/TensoRF). The dynamic branch builds on [TeTriRF](https://github.com/wuminye/TeTriRF).
 
 ## Citation
+
 If you find this repository useful, please cite CATRF:
 
+```bibtex
 @inproceedings{chen2026catrf,
   title={CATRF: Codec-Adaptive TriPlane Radiance Fields for Volumetric Content Delivery},
   author={Chen, Tung-I and Wang, Lingdong and Maji, Subhransu and Sitaraman, Ramesh K},
@@ -167,3 +168,4 @@ If you find this repository useful, please cite CATRF:
   pages={457--467},
   year={2026}
 }
+```
