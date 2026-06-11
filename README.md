@@ -20,6 +20,72 @@ The training of CATRF consists of two major stages:
 
 2. Standard-codec-in-the-loop fine-tuning: Quantize and pack learned feature planes into codec-compatible 2D canvases, run a standard codec roundtrip, unpack/dequantize the decoded planes, and optimize the rendered reconstruction quality using a straight-through estimator (STE). This adapts TriPlanes to standard codec compression artifacts. The resulting TriPlanes can then be compressed into compact bitstreams using standard codecs without comprimising rendering quality after decompression.
 
+## :hammer: Usage -- catrf_static
+
+For each step, click it to expand and view details.
+
+<details>
+  <summary><font size="5"> Prerequisites</font></summary><br>
+
+* Python 3.8+
+* CUDA 11.8
+* Environment
+    ```
+    conda create -n catrf_static python=3.8
+    conda activate catrf_static
+
+    pip install torch==2.2.1 torchvision==0.17.1 --index-url https://download.pytorch.org/whl/cu118
+    pip install tqdm scikit-image opencv-python configargparse lpips imageio-ffmpeg kornia
+    pip install pytorch_msssim compressai wandb tensorboard
+    ```
+
+</details>
+
+<details>
+
+  <summary><font size="5"> Dataset Preprocessing</font></summary><br>
+
+* This code supports the NeRF-Synthetic dataset
+* Download from the [NeRF project page](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1)
+* The expected data folder architecture:
+    ```
+    catrf_static
+    - data
+    - - nerf_synthetic
+    - - - chair
+    - - - drums
+    - - - ficus
+    - - - hotdog
+    - - - lego
+    - - - materials
+    - - - mic
+    - - - ship
+    ```
+</details>
+
+<details>
+
+  <summary><font size="5"> Pre-training</font></summary><br>
+
+* E.g., lego scene:
+    ```
+    python catrf_static/train/train_tensorf.py --config catrf_static/configs/nerf_lego/pretrain.txt
+    ```
+</details>
+
+<details>
+
+  <summary><font size="5"> SCL fine-tuning (JPEG)</font></summary><br>
+
+* E.g., lego scene at JPEG quality 20:
+    ```
+    python catrf_static/train/train_ste.py --config catrf_static/configs/nerf_lego/jpeg_q20.txt \
+        --ckpt ./logs/tensorf_lego_VM_codec/tensorf_lego_VM_codec.th \
+        --compression --batch_size 65536 --codec_training \
+        --lr_decay_target_ratio 1 --n_iters 30000
+    ```
+</details>
+
 ## :hammer: Usage -- catrf_dynamic
 
 For each step, click it to expand and view details.
@@ -89,7 +155,7 @@ For each step, click it to expand and view details.
 
 ## Acknowledgements
 
-The static branch builds on [NeRFCodec](https://github.com/JasonLSC/NeRFCodec_public) and a dyndynamic branch builds on [TeTriRF](https://github.com/wuminye/TeTriRF).
+The static branch builds on [NeRFCodec](https://github.com/JasonLSC/NeRFCodec_public) and the dynamic branch builds on [TeTriRF](https://github.com/wuminye/TeTriRF).
 
 ## Citation
 If you find this repository useful, please cite CATRF:
