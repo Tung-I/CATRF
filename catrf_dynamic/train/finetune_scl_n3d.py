@@ -1,5 +1,6 @@
 from __future__ import annotations
-import os, time, copy, random, argparse
+import os, sys, time, copy, random, argparse
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Callable
 
@@ -28,7 +29,7 @@ from third_party.TeTriRF.lib import dvgo, dvgo_video, dcvc_dvgo_video, utils
 from third_party.TeTriRF.lib.load_data import load_data
 from torch_efficient_distloss import flatten_eff_distloss
 
-from catrf_dynamic.models.ste_dvgo_video import STE_DVGO_Video
+from src.models.ste_dvgo_video import STE_DVGO_Video
 
 def force_outputs_under_catrf_dynamic(cfg: Config, default_subdir: str = "outputs/scl_n3d") -> None:
     """Force checkpoints/renders to be saved under CATRF/catrf_dynamic.

@@ -2,10 +2,10 @@ _base_ = '../default.py'
 expname = 'sear_steak_video'
 ckptname = None
 wandbprojectname = 'sear_steak_video'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_sear_steak'
+basedir = './logs/dynerf_sear_steak'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/sear_steak/llff/',
+	datadir='./data/n3d/sear_steak/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -1.0],

@@ -2,10 +2,10 @@ _base_ = '../default.py'
 expname = 'vp9_qp32'
 ckptname = 'flame_steak_video_ds3'
 wandbprojectname = 'ste_flame_steak'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_flame_steak'
+basedir = './logs/dynerf_flame_steak'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/flame_steak/llff/',
+	datadir='./data/n3d/flame_steak/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -0.6],

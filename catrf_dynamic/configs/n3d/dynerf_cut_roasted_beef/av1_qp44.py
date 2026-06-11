@@ -2,10 +2,10 @@ _base_ = '../default.py'
 expname = 'av1_qp44'
 ckptname = 'cut_roasted_beef_video'
 wandbprojectname = 'stg_cut_roasted_beef'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_cut_roasted_beef'
+basedir = './logs/dynerf_cut_roasted_beef'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/cut_roasted_beef/llff/',
+	datadir='./data/n3d/cut_roasted_beef/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -0.6],

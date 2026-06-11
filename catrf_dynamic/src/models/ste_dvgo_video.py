@@ -358,33 +358,8 @@ class STE_DVGO_Video(nn.Module):
         return out
 
     # -------------------------------------------------------------------------
-    # Model instantiation (same as your image class)
+    # Model instantiation
     # -------------------------------------------------------------------------
-    def _initial_models(self):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model_kwargs = copy.deepcopy(self.cfg.fine_model_and_render)
-        num_voxels = model_kwargs.pop('num_voxels')
-        cfg_train = self.cfg.fine_train
-        if len(cfg_train.pg_scale):
-            num_voxels = int(num_voxels / (2**len(cfg_train.pg_scale)))
-
-        for frameid in self.frameids:
-            ckpt = os.path.join(self.cfg.basedir, self.cfg.expname, f'coarse_last_{frameid}.tar')
-            if not os.path.isfile(ckpt):
-                ckpt = None
-            key = str(frameid)
-            if self.cfg.data.ndc:
-                self.dvgos[key] = DirectMPIGO(
-                    xyz_min=self.xyz_min, xyz_max=self.xyz_max,
-                    num_voxels=num_voxels, mask_cache_path=ckpt, **model_kwargs)
-            else:
-                self.dvgos[key] = DirectVoxGO(
-                    xyz_min=self.xyz_min, xyz_max=self.xyz_max,
-                    num_voxels=num_voxels, mask_cache_path=ckpt,
-                    rgb_model=self.cfg.fine_model_and_render.RGB_model, **model_kwargs)
-            self.dvgos[key] = self.dvgos[key].to(device)
-
-
     def _initial_models(self):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model_kwargs = copy.deepcopy(self.cfg.fine_model_and_render)

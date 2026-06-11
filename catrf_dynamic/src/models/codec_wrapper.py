@@ -533,8 +533,8 @@ class DCVCVideoCodecWrapper(nn.Module):
 
         # ---- instantiate the official DCVC video codec (I/P) ----
         self.codec = DCVCVideoCodec(
-            i_frame_weight_path='/home/tungichen_umass_edu/DCVC/checkpoints/cvpr2025_image.pth.tar',
-            p_frame_weight_path='/home/tungichen_umass_edu/DCVC/checkpoints/cvpr2025_video.pth.tar',
+            i_frame_weight_path=getattr(cfg_dcvc, 'i_frame_weight_path', './checkpoints/cvpr2025_image.pth.tar'),
+            p_frame_weight_path=getattr(cfg_dcvc, 'p_frame_weight_path', './checkpoints/cvpr2025_video.pth.tar'),
             # reset_interval=int(getattr(cfg_dcvc, "reset_interval", 32)),
             reset_interval=int(getattr(cfg_dcvc, "reset_interval", 20)),
             intra_period=int(getattr(cfg_dcvc, "intra_period", -1)),
@@ -722,8 +722,8 @@ class DCVCVideoCodecWrapper(nn.Module):
 
 #         # ---- instantiate the official video codec (I/P) ----
 #         self.codec = DCVCVideoCodec(
-#             i_frame_weight_path='/home/tungichen_umass_edu/DCVC/checkpoints/cvpr2025_image.pth.tar',
-#             p_frame_weight_path='/home/tungichen_umass_edu/DCVC/checkpoints/cvpr2025_video.pth.tar',
+#             i_frame_weight_path=getattr(cfg_dcvc, 'i_frame_weight_path', './checkpoints/cvpr2025_image.pth.tar'),
+#             p_frame_weight_path=getattr(cfg_dcvc, 'p_frame_weight_path', './checkpoints/cvpr2025_video.pth.tar'),
 #             reset_interval=int(getattr(cfg_dcvc, "reset_interval", 32)),
 #             intra_period=int(getattr(cfg_dcvc, "intra_period", -1)),
 #             device=str(self.device),

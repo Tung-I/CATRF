@@ -71,7 +71,7 @@ For each step, click it to expand and view details.
 
 * E.g., GoP=15:
     ```
-    python train_seq_triplane.py --config configs/dynerf_cook_spinach/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
+    python catrf_dynamic/train/train_vanilla_n3d.py --config catrf_dynamic/configs/n3d/dynerf_cook_spinach/video.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
     ```
 </details>
 
@@ -81,25 +81,10 @@ For each step, click it to expand and view details.
 
 * E.g., GoP=15:
     ```
-    python train_codec_nerf_video.py --config configs/dynerf_flame_steak/av1_qp44_mosaic_affine_tv.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 
+    python catrf_dynamic/train/finetune_scl_n3d.py --config catrf_dynamic/configs/n3d/dynerf_flame_steak/av1_qp44.py --frame_ids 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14
     ```
 </details>
 
-## Environment Setup
-
-CATRF contains two branches of code: a static branch based on [NeRFCodec](https://github.com/JasonLSC/NeRFCodec_public) and a dynamic branch based on [TeTriRF](https://github.com/wuminye/TeTriRF).
-
-### Static branch
-
-```bash
-cd envs
-conda env create -n catrf_static -f envs/environment_static.yml
-conda activate catrf_static
-conda env create -n catrf_dynamic -f envs/environment_dynamic.yml
-conda activate catrf_dynamic
-
-torch==2.2.1+cu118
-```
 
 
 ## Acknowledgements

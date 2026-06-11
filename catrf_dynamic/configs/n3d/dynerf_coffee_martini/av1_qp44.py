@@ -2,10 +2,10 @@ _base_ = '../default.py'
 expname = 'av1_qp44'
 ckptname = 'coffee_martini_video'
 wandbprojectname = 'stg_coffee_martini'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_coffee_martini'
+basedir = './logs/dynerf_coffee_martini'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/coffee_martini/llff/',
+	datadir='./data/n3d/coffee_martini/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -1.0],

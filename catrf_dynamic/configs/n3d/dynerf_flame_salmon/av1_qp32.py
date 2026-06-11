@@ -3,10 +3,10 @@ expname = 'av1_qp32'
 # ckptname = 'flame_salmon_video_ds3'
 ckptname = None
 wandbprojectname = 'ste_flame_salmon'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_flame_salmon'
+basedir = './logs/dynerf_flame_salmon'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/flame_salmon_1/llff/',
+	datadir='./data/n3d/flame_salmon_1/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -0.6],

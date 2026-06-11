@@ -3,10 +3,10 @@ _base_ = '../default.py'
 expname = 'flame_salmon_video'
 ckptname = None
 wandbprojectname = 'ca_flame_slamon_video'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_flame_salmon'
+basedir = './logs/dynerf_flame_salmon'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/flame_salmon_1/llff/',
+	datadir='./data/n3d/flame_salmon_1/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -0.6],

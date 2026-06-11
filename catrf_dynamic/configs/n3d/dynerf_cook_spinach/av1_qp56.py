@@ -2,10 +2,10 @@ _base_ = '../default.py'
 expname = 'av1_qp56'
 ckptname = 'cook_spinach_video'
 wandbprojectname = 'stg_cook_spinach'
-basedir = '/home/tungichen_umass_edu/DCVC/logs/dynerf_cook_spinach'
+basedir = './logs/dynerf_cook_spinach'
 
 data = dict(
-	datadir='/home/tungichen_umass_edu/DCVC/data/n3d/cook_spinach/llff/',
+	datadir='./data/n3d/cook_spinach/llff/',
 	dataset_type='llff',
  	ndc=True,
 	xyz_min = [-1.4,  -1.4, -0.6],
