@@ -15,7 +15,6 @@ if str(_CATRF_STATIC_ROOT) not in sys.path:
     sys.path.insert(0, str(_CATRF_STATIC_ROOT))
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
 from opt import config_parser
@@ -206,15 +205,6 @@ def reconstruction(args):
     with open(f"{logdir}/train_cfg.json", "w") as f:
         json.dump(vars(args), f)
 
-    import wandb
-    wandb.init(
-        project=args.wandb_project,
-        name=args.expname,
-        dir=logdir,
-        config=vars(args),
-        mode=("disabled" if getattr(args, "wandb_off", 0) else "online"),
-    )
-
     dataset = dataset_dict[args.dataset_name]
     train_dataset = dataset(args.datadir, split="train", downsample=args.downsample_train, is_stack=False)
     test_dataset  = dataset(args.datadir, split="test",  downsample=args.downsample_train, is_stack=True)
@@ -289,47 +279,29 @@ def reconstruction(args):
         del depth_map
         torch.cuda.empty_cache()
 
-        log_bits = {}
-        if args.compression and coding_output is not None:
-            den_packs = coding_output["den"]["rec_likelihood"]
-            app_packs = coding_output["app"]["rec_likelihood"]
-            for i, pack in enumerate(den_packs):
-                log_bits[f"bits/den_{i}"] = int(pack["bits"])
-            for i, pack in enumerate(app_packs):
-                log_bits[f"bits/app_{i}"] = int(pack["bits"])
-            log_bits["bits/den_total"] = sum(log_bits[f"bits/den_{i}"] for i in range(len(den_packs)))
-            log_bits["bits/app_total"] = sum(log_bits[f"bits/app_{i}"] for i in range(len(app_packs)))
-            log_bits["bits/total"]     = log_bits["bits/den_total"] + log_bits["bits/app_total"]
-
         mse = torch.mean((rgb_map - rgb_train) ** 2)
         loss = mse
 
         if Ortho_w > 0:
             loss_reg = tensorf.vector_comp_diffs()
             loss += Ortho_w * loss_reg
-            wandb.log({"train/reg": float(loss_reg)}, step=it)
         if L1_w > 0:
             loss_l1 = tensorf.density_L1()
             loss += L1_w * loss_l1
-            wandb.log({"train/reg_l1": float(loss_l1)}, step=it)
         if L1_w_app > 0:
             loss_l1_app = tensorf.app_L1()
             loss += L1_w_app * loss_l1_app
-            wandb.log({"train/reg_l1_app": float(loss_l1_app)}, step=it)
         if TV_w_d > 0:
             TV_w_d *= lr_factor
             loss_tv = tensorf.TV_loss_density(tvreg) * TV_w_d
             loss += loss_tv
-            wandb.log({"train/reg_tv_density": float(loss_tv)}, step=it)
         if TV_w_a > 0:
             TV_w_a *= lr_factor
             loss_tv = tensorf.TV_loss_app(tvreg) * TV_w_a
             loss += loss_tv
-            wandb.log({"train/reg_tv_app": float(loss_tv)}, step=it)
         if getattr(args, "feat_rec_loss", 0):
             feat_rec = features_rec_loss(tensorf, coding_output)
             loss += 1e-2 * feat_rec
-            wandb.log({"train/feat_rec_loss": float(feat_rec)}, step=it)
 
         optimizer.zero_grad()
         loss.backward()
@@ -337,12 +309,8 @@ def reconstruction(args):
 
         psnr = -10.0 * np.log(mse.detach().item()) / np.log(10.0)
         PSNRs.append(psnr)
-        log = {"train/PSNR": float(psnr), "train/mse": float(mse.detach().item())}
-        log.update(log_bits)
         for g in optimizer.param_groups:
             g["lr"] = g["lr"] * lr_factor
-        log["lr"] = float(optimizer.param_groups[0]["lr"])
-        wandb.log(log, step=it)
 
         if it % args.progress_refresh_rate == 0:
             pbar.set_description(
@@ -359,14 +327,12 @@ def reconstruction(args):
                         N_vis=args.N_vis, prtx=f"{args.codec_backend}{it:06d}_", N_samples=nSamples,
                         white_bg=white_bg, ndc_ray=ndc_ray, compute_extra_metrics=False,
                     )
-                    wandb.log({"test/PSNR": float(np.mean(PSNRs_test))}, step=it)
             else:
                 PSNRs_test = evaluation(
                     test_dataset, tensorf, args, renderer, f"{logdir}/imgs_vis/",
                     N_vis=args.N_vis, prtx=f"{it:06d}_", N_samples=nSamples,
                     white_bg=white_bg, ndc_ray=ndc_ray, compute_extra_metrics=False,
                 )
-                wandb.log({"test/PSNR": float(np.mean(PSNRs_test))}, step=it)
 
         if it in update_AlphaMask_list:
             if tensorf.gridSize[0] * tensorf.gridSize[1] * tensorf.gridSize[2] < 256 ** 3:
@@ -409,16 +375,10 @@ def reconstruction(args):
             den_bits = sum([p["bits"] for p in out["den"]["rec_likelihood"]])
             app_bits = sum([p["bits"] for p in out["app"]["rec_likelihood"]])
             print(f"====> Final {args.codec_backend.upper()} size (bits): {(den_bits+app_bits):.0f}")
-            wandb.log({
-                "final/bits_den_total": int(den_bits),
-                "final/bits_app_total": int(app_bits),
-                "final/bits_total":     int(den_bits + app_bits),
-            })
         PSNRs_test = evaluation(
             test_dataset, tensorf, args, renderer, f"{logdir}/imgs_test_all/",
             N_vis=-1, N_samples=10, white_bg=white_bg, ndc_ray=ndc_ray, device=device,
         )
-        wandb.log({"final/test_PSNR_all": float(np.mean(PSNRs_test))}, step=final_it)
         print(f"======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <======")
 
     if args.render_train:

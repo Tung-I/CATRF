@@ -1,6 +1,6 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/lego
+datadir = ./catrf_static/data/nerf_synthetic/lego
 expname =  tensorste_lego_jpeg20
 basedir = ./catrf_static/logs
 wandb_project = nerfcodec-ste-lego

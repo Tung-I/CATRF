@@ -15,7 +15,6 @@ if str(_CATRF_STATIC_ROOT) not in sys.path:
     sys.path.insert(0, str(_CATRF_STATIC_ROOT))
 
 import torch
-import wandb
 from tqdm.auto import tqdm
 
 from opt import config_parser
@@ -28,18 +27,6 @@ from utils import maybe_align_cdf_and_load_system, load_optim_states_if_any, sav
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 renderer = OctreeRender_trilinear_fast
 
-
-def _wandb_init(args, logdir):
-    project = getattr(args, "wandb_project", "catrf-static-pretrain")
-    run_name = getattr(args, "wandb_run_name", args.expname)
-    mode = getattr(args, "wandb_mode", "online")
-    wandb.init(
-        project=project,
-        name=run_name,
-        dir=logdir,
-        mode=mode,
-        config=vars(args),
-    )
 
 def set_seed(seed: int = 20211202):
     random.seed(seed)
@@ -205,8 +192,6 @@ def reconstruction(args):
     with open(f"{logdir}/train_cfg.json", "w") as f:
         json.dump(vars(args), f)
 
-    _wandb_init(args, logdir)
-
     aabb = train_dataset.scene_bbox.to(device)
     reso_cur = N_to_reso(args.N_voxel_init, aabb)
     tensorf = _build_model(args, aabb, reso_cur, near_far)
@@ -258,10 +243,6 @@ def reconstruction(args):
 
     pbar = tqdm(range(args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
 
-    def _psnr_from_mse(mse_val):
-        return -10.0 * np.log(mse_val) / np.log(10.0)
-    train_psnrs_since_vis = []
-
     for it in pbar:
         final_it = it
         ray_idx = sampler.nextids()
@@ -298,17 +279,13 @@ def reconstruction(args):
 
         mse = torch.mean((rgb_map - rgb_train) ** 2)
         loss = mse
-        loss_reg_val = 0.0; loss_l1_val = 0.0
-        reg_tv_density_val = 0.0; reg_tv_app_val = 0.0
 
         if Ortho_w > 0:
             loss_reg = tensorf.vector_comp_diffs()
             loss += Ortho_w * loss_reg
-            loss_reg_val = float(loss_reg.detach().item())
         if L1_w > 0:
             loss_l1 = tensorf.density_L1()
             loss += L1_w * loss_l1
-            loss_l1_val = float(loss_l1.detach().item())
         if L1_w_app > 0:
             loss_l1_app = tensorf.app_L1()
             loss += L1_w_app * loss_l1_app
@@ -316,12 +293,10 @@ def reconstruction(args):
             TV_w_d *= lr_factor
             loss_tv_d = tensorf.TV_loss_density(tvreg) * TV_w_d
             loss += loss_tv_d
-            reg_tv_density_val = float(loss_tv_d.detach().item())
         if TV_w_a > 0:
             TV_w_a *= lr_factor
             loss_tv_a = tensorf.TV_loss_app(tvreg) * TV_w_a
             loss += loss_tv_a
-            reg_tv_app_val = float(loss_tv_a.detach().item())
 
         if args.compression and args.rate_penalty:
             loss = loss + rate_loss * 1e-9
@@ -339,21 +314,6 @@ def reconstruction(args):
             aux_loss = tensorf.get_aux_loss()
             aux_loss.backward()
             aux_optimizer.step()
-
-        mse_val = float(mse.detach().item())
-        train_psnr = float(_psnr_from_mse(mse_val))
-        train_psnrs_since_vis.append(train_psnr)
-
-        log_dict = {
-            "iter": int(it),
-            "train/psnr": train_psnr,
-            "train/rate_loss": float(rate_loss) if isinstance(rate_loss, torch.Tensor) else float(rate_loss),
-            "train/loss_reg": loss_reg_val,
-            "train/loss_l1": loss_l1_val,
-            "train/reg_tv_density": reg_tv_density_val,
-            "train/reg_tv_app": reg_tv_app_val,
-        }
-        wandb.log(log_dict, step=it)
 
         for g in optimizer.param_groups:
             g["lr"] = g["lr"] * lr_factor
@@ -381,7 +341,6 @@ def reconstruction(args):
                         N_vis=args.N_vis, prtx=f"compress{it:06d}_", N_samples=nSamples,
                         white_bg=white_bg, ndc_ray=ndc_ray, compute_extra_metrics=False,
                     )
-                    wandb.log({"test/psnr": float(np.mean(PSNRs_test)), "iter": int(it)}, step=it)
                     tensorf.den_feat_codec.train(); tensorf.app_feat_codec.train()
             else:
                 PSNRs_test = evaluation(
@@ -389,11 +348,6 @@ def reconstruction(args):
                     N_vis=args.N_vis, prtx=f"{it:06d}_", N_samples=nSamples,
                     white_bg=white_bg, ndc_ray=ndc_ray, compute_extra_metrics=False,
                 )
-                wandb.log({"test/psnr": float(np.mean(PSNRs_test)), "iter": int(it)}, step=it)
-
-            if len(train_psnrs_since_vis) > 0:
-                wandb.log({"train/psnr@vis": float(np.mean(train_psnrs_since_vis)), "iter": int(it)}, step=it)
-                train_psnrs_since_vis.clear()
 
         if it in update_AlphaMask_list:
             if tensorf.gridSize[0] * tensorf.gridSize[1] * tensorf.gridSize[2] < 256 ** 3:
@@ -450,7 +404,6 @@ def reconstruction(args):
             test_dataset, tensorf, args, renderer, f"{logdir}/imgs_test_all/",
             N_vis=-1, N_samples=5, white_bg=white_bg, ndc_ray=ndc_ray, device=device,
         )
-        wandb.log({"test/psnr_final": float(np.mean(PSNRs_test)), "iter": int(final_it)}, step=final_it)
         print(f"======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <======")
 
     if args.render_train:

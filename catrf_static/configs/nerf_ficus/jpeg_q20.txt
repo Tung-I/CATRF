@@ -1,6 +1,6 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/ficus
+datadir = ./catrf_static/data/nerf_synthetic/ficus
 expname =  tensorste_ficus_jpeg20
 basedir = ./catrf_static/logs
 

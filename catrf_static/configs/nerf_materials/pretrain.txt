@@ -1,10 +1,10 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/materials
-expname =  tensorf_materials_VM_codec
+datadir = ./catrf_static/data/nerf_synthetic/materials
+expname =  tensorf_materials_VM
 basedir = ./catrf_static/logs
 
-n_iters = 60000
+n_iters = 30000
 batch_size = 4096
 
 N_voxel_init = 2097156 # 128**3
@@ -15,7 +15,7 @@ update_AlphaMask_list = [2000, 4000, 6000, 11000, 16000, 21000, 26000]
 #update_AlphaMask_list = [30001]
 
 N_vis = 5
-vis_every = 5000
+vis_every = 10000
 
 render_test = 1
 

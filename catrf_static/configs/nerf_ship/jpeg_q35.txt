@@ -1,6 +1,6 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/ship
+datadir = ./catrf_static/data/nerf_synthetic/ship
 expname =  tensorste_ship_jpeg35
 basedir = ./catrf_static/logs
 

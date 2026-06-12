@@ -1,5 +1,5 @@
 dataset_name = blender
-datadir = ./data/nerf_synthetic/chair
+datadir = ./catrf_static/data/nerf_synthetic/chair
 expname =  ste_chair_jpeg20
 basedir = ./catrf_static/logs
 

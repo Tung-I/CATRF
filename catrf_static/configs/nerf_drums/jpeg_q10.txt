@@ -1,6 +1,6 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/drums
+datadir = ./catrf_static/data/nerf_synthetic/drums
 expname =  tensorste_drums_jpeg10
 basedir = ./catrf_static/logs
 

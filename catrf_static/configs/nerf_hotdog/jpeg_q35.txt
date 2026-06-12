@@ -1,6 +1,6 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/hotdog
+datadir = ./catrf_static/data/nerf_synthetic/hotdog
 expname =  tensorste_hotdog_jpeg35
 basedir = ./catrf_static/logs
 

@@ -1,6 +1,6 @@
 
 dataset_name = blender
-datadir = ./data/nerf_synthetic/mic
+datadir = ./catrf_static/data/nerf_synthetic/mic
 expname =  tensorste_mic_jpeg35
 basedir = ./catrf_static/logs
 
